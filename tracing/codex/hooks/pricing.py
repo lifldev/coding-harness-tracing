@@ -13,7 +13,7 @@ def api_pricing(model: str, service_tier: str, usage: dict) -> dict | None:
     if model != "gpt-6.1-sol":
         return None
     prompt, output = usage.get("prompt_tokens"), usage.get("completion_tokens")
-    if any(type(v) is not int or v < 0 for v in (prompt, output)):
+    if type(prompt) is not int or type(output) is not int or prompt < 0 or output < 0:
         return None
     tier = {"": "standard", "default": "standard", "fast": "priority"}.get(service_tier, service_tier)
     if tier not in _MULTIPLIERS:
