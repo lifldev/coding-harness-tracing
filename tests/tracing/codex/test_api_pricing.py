@@ -1,5 +1,7 @@
 """API-equivalent billing selection uses individual response usage."""
 
+import re
+
 import pytest
 
 from tests.tracing.codex.test_fidelity import attrs, modern_records, record, spans, write
@@ -63,3 +65,21 @@ def test_service_tier_change_is_scoped_to_subsequent_responses(tmp_path):
     turn = _extract_turn_from_rollout(write(tmp_path, rows), "t")
     llms = [attrs(s) for s in spans(turn) if attrs(s)["openinference.span.kind"] == "LLM"]
     assert [a["llm.model_name"] for a in llms] == ["gpt-6.1-sol [priority]", "gpt-6.1-sol [flex]"]
+
+
+def test_unknown_tier_cannot_match_phoenix_standard_prices(tmp_path):
+    from tracing.codex.hooks.pricing import phoenix_model_inputs
+
+    rows = modern_records()
+    rows.insert(
+        1, record("event_msg", {"type": "thread_settings_applied", "thread_settings": {"service_tier": "future-tier"}})
+    )
+    rows.insert(3, record("turn_context", {"model": "gpt-6.1-sol", "turn_id": "t"}))
+    turn = _extract_turn_from_rollout(write(tmp_path, rows), "t")
+    for span in spans(turn):
+        a = attrs(span)
+        if a["openinference.span.kind"] != "LLM":
+            continue
+        assert "api_cost.estimated_usd" not in a
+        assert a["codex.model_name"] == "gpt-6.1-sol"
+        assert not any(re.search(p["namePattern"], a["llm.model_name"]) for p in phoenix_model_inputs())

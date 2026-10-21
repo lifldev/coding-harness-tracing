@@ -256,6 +256,17 @@ def render_turn(thread_id: str, turn_id: str, turn: dict, identity) -> dict:
                 attrs["api_cost.rate_date"] = RATE_DATE
                 attrs["api_cost.rate_source"] = RATE_SOURCE
                 attrs["api_cost.service_tier_assumed"] = not bool(tier)
+            elif event.model == "gpt-6.1-sol" and tier not in (
+                "",
+                "default",
+                "standard",
+                "priority",
+                "fast",
+                "flex",
+                "ultrafast",
+            ):
+                attrs["llm.model_name"] = event.model + " [unpriced tier]"
+                attrs["api_cost.basis"] = "unpriced_service_tier"
             if event.source_id:
                 attrs["llm.message.id"] = event.source_id
             for source, target in TOKEN_ATTRS:
