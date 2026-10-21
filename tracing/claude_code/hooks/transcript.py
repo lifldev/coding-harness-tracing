@@ -39,6 +39,10 @@ def parse_claude_transcript(
     models_by_message_id: dict[str, ModelCallEvent] = {}
     agent_id = root_event.agent_id if isinstance(root_event, AgentEvent) else None
     sequence = root_event.sequence + 1
+    # Claude records response arrival, not request dispatch. The preceding
+    # conversation boundary is an estimate that can include local processing.
+    request_ms = _valid_ms(root_event.started_at_ms)
+    seen_record_ids: set[str] = set()
 
     try:
         lines = transcript.read_text(encoding="utf-8").splitlines()
@@ -69,6 +73,17 @@ def parse_claude_transcript(
             continue
         if not isinstance(entry, dict):
             continue
+        # Claude Code 2.1.3xx also records the request it replays to the model
+        # ("api-request-blob"), with copies of earlier tool_use and tool_result
+        # blocks. Only conversation records are events; the replay would
+        # duplicate every tool as a pending span under an empty model call.
+        if entry.get("type") not in (None, "assistant", "user"):
+            continue
+        record_id = _string(entry.get("uuid"))
+        if record_id and record_id in seen_record_ids:
+            continue
+        if record_id:
+            seen_record_ids.add(record_id)
 
         message = entry.get("message")
         if not isinstance(message, dict):
@@ -109,13 +124,24 @@ def parse_claude_transcript(
             # stay one-event-per-record (also preserves assistant-line-* ids).
             model_event = models_by_message_id.get(message_id) if message_id else None
             if model_event is None:
+                started_at_ms = timestamp_ms
+                if timestamp_ms is not None and request_ms is not None and request_ms <= timestamp_ms:
+                    started_at_ms = request_ms
+                    parser_diagnostics.append(
+                        GraphDiagnostic(
+                            code="inferred_model_start",
+                            message="Start estimated from preceding conversation boundary, not recorded request dispatch",
+                            event_id=event_id,
+                            severity="info",
+                        )
+                    )
                 model_event = ModelCallEvent(
                     event_id=event_id,
                     parent_event_id=root_event.event_id,
                     session_id=_string(entry.get("sessionId")) or root_event.session_id,
                     turn_id=root_event.turn_id,
                     sequence=sequence,
-                    started_at_ms=timestamp_ms,
+                    started_at_ms=started_at_ms,
                     ended_at_ms=timestamp_ms,
                     status=EventStatus.COMPLETED,
                     input=None,
@@ -141,10 +167,15 @@ def parse_claude_transcript(
                     model_event.ended_at_ms = timestamp_ms
                 if not model_event.model:
                     model_event.model = _string(message.get("model")) or None
-                record_usage = _usage(message.get("usage"))
-                existing_total = model_event.usage.total_tokens if model_event.usage else -1
-                if record_usage.total_tokens > existing_total:
-                    model_event.usage = record_usage
+                # The final reported snapshot is authoritative, including cache
+                # corrections that leave uncached input/output totals unchanged.
+                if isinstance(message.get("usage"), dict) and message["usage"]:
+                    model_event.usage = _usage(message["usage"])
+            if entry.get("isApiErrorMessage") is True or message.get("stop_reason") == "error":
+                model_event.status = EventStatus.FAILED
+                model_event.error = _string(entry.get("error")) or _assistant_text(content) or "Model request failed"
+            if timestamp_ms is not None:
+                request_ms = timestamp_ms
 
             for block in _content_blocks(content):
                 if block.get("type") != "tool_use":
@@ -184,6 +215,8 @@ def parse_claude_transcript(
 
         elif role == "user":
             result_timestamp_ms = _timestamp_ms(entry.get("timestamp"))
+            if result_timestamp_ms is not None:
+                request_ms = result_timestamp_ms
             for block in _content_blocks(message.get("content")):
                 if block.get("type") != "tool_result":
                     continue
@@ -224,7 +257,14 @@ def parse_claude_transcript(
                 content = block.get("content")
                 correlated_tool.output = _tool_output(entry, content)
                 correlated_tool.ended_at_ms = result_timestamp_ms
-                correlated_tool.status = EventStatus.FAILED if failed else EventStatus.COMPLETED
+                result = entry.get("toolUseResult")
+                cancelled = isinstance(result, dict) and (
+                    result.get("status") in {"cancelled", "canceled", "interrupted"}
+                    or result.get("interrupted") is True
+                )
+                correlated_tool.status = (
+                    EventStatus.CANCELLED if cancelled else EventStatus.FAILED if failed else EventStatus.COMPLETED
+                )
                 if "timestamp" in entry and result_timestamp_ms is None:
                     parser_diagnostics.append(
                         GraphDiagnostic(
@@ -304,6 +344,12 @@ def _optional_nonnegative_int(value: Any) -> int | None:
     if value is None:
         return None
     return _nonnegative_int(value)
+
+
+def _valid_ms(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        return None
+    return int(value)
 
 
 def _timestamp_ms(value: Any) -> int | None:

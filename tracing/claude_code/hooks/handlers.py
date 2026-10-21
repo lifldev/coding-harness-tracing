@@ -8,10 +8,12 @@ entry point registered in pyproject.toml [project.scripts].
 import json
 import math
 import sys
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
 from core.common import (
+    FileLock,
     build_span,
     env,
     error,
@@ -475,6 +477,8 @@ def _scan_transcript_for_usage(
                 entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(entry, dict) or entry.get("type") not in (None, "assistant", "user"):
+                continue
             msg = entry.get("message")
             if not isinstance(msg, dict) or msg.get("role") != "assistant":
                 continue
@@ -603,9 +607,14 @@ def _transcript_has_stable_assistant_uuid(path_value: object) -> bool:
                     record = json.loads(raw_line)
                 except (json.JSONDecodeError, TypeError, ValueError):
                     continue
-                if record.get("type") == "assistant" and isinstance(record.get("uuid"), str) and record["uuid"]:
+                if (
+                    isinstance(record, dict)
+                    and record.get("type") == "assistant"
+                    and isinstance(record.get("uuid"), str)
+                    and record["uuid"]
+                ):
                     return True
-    except OSError:
+    except (OSError, UnicodeError):
         return False
     return False
 
@@ -614,7 +623,10 @@ def _buffer_subagent(state, input_json: dict, ended_at_ms: int) -> bool:
     agent_id = input_json.get("agent_id")
     transcript_path = input_json.get("agent_transcript_path")
     main_transcript_path = input_json.get("transcript_path")
-    if main_transcript_path == transcript_path or not _transcript_has_stable_assistant_uuid(main_transcript_path):
+    if not (
+        _transcript_has_stable_assistant_uuid(main_transcript_path)
+        or _transcript_has_stable_assistant_uuid(transcript_path)
+    ):
         return False
     if not isinstance(agent_id, str) or not agent_id:
         return False
@@ -633,6 +645,9 @@ def _buffer_subagent(state, input_json: dict, ended_at_ms: int) -> bool:
         "started_at_ms": None,
         "ended_at_ms": ended_at_ms,
         "output": input_json.get("last_assistant_message") or "",
+        "parent_tool_use_id": _parent_tool_use_id(input_json),
+        "status": _subagent_status(input_json).value,
+        "error": input_json.get("error_details") or input_json.get("error") or None,
     }
     if state.state_file is None:
         return False
@@ -642,13 +657,59 @@ def _buffer_subagent(state, input_json: dict, ended_at_ms: int) -> bool:
             descriptors = _decode_pending_subagents(data.get("pending_subagents", ""))
             stored_start = str(data.get(f"subagent_{agent_id}_start_time", ""))
             descriptor["started_at_ms"] = int(stored_start) if stored_start.isdigit() else None
-            descriptors[agent_id] = descriptor
+            # Duplicate Stop hooks retain the first observed completion boundary.
+            descriptors.setdefault(agent_id, descriptor)
             data["pending_subagents"] = json.dumps(descriptors, sort_keys=True)
             state._write(data)
     except Exception as exc:
         error(f"Failed to buffer subagent {agent_id}: {exc}")
         return False
     return True
+
+
+def _parent_tool_use_id(input_json: dict) -> str:
+    """Read an explicit hook or adjacent transcript-metadata relationship."""
+    call_id = input_json.get("parent_tool_use_id")
+    if isinstance(call_id, str) and call_id:
+        return call_id
+    path = input_json.get("agent_transcript_path")
+    if isinstance(path, str) and path:
+        try:
+            metadata = json.loads(Path(path).with_suffix(".meta.json").read_text(encoding="utf-8"))
+            call_id = metadata.get("toolUseId") if isinstance(metadata, dict) else None
+            if isinstance(call_id, str):
+                return call_id
+        except (OSError, UnicodeError, ValueError):
+            pass
+    return ""
+
+
+def _subagent_status(payload: dict) -> EventStatus:
+    status = payload.get("status")
+    if status in {"cancelled", "canceled", "interrupted"} or payload.get("interrupted") is True:
+        return EventStatus.CANCELLED
+    if status in {"failed", "error"} or payload.get("error") or payload.get("error_details"):
+        return EventStatus.FAILED
+    return EventStatus.COMPLETED
+
+
+def _export_lock(state):
+    # Keep export snapshots and acknowledgment serial without blocking tool
+    # observations on the state lock. Never break a live export lock on timeout.
+    if state.state_file is None:
+        return nullcontext()
+    return FileLock(state.state_file.with_suffix(".export.lock"), timeout=3, break_on_timeout=False)
+
+
+def _exported_subagents(state) -> dict[str, dict]:
+    return _decode_pending_subagents(state.get("exported_subagents") or "")
+
+
+def _mark_exported_subagents(data: dict, agent_ids) -> None:
+    exported = _decode_pending_subagents(data.get("exported_subagents", ""))
+    exported.update({agent_id: {} for agent_id in agent_ids})
+    if exported:
+        data["exported_subagents"] = json.dumps(exported, sort_keys=True)
 
 
 def _agent_id_from_tool(event: ToolEvent) -> str:
@@ -661,57 +722,285 @@ def _agent_id_from_tool(event: ToolEvent) -> str:
     return agent_id if isinstance(agent_id, str) else ""
 
 
+# Background (async) subagents: the Agent tool returns ``async_launched`` at
+# once and the subagent stops after the launching turn was exported, often
+# while no turn is open. The launching turn records where its Agent span went;
+# SubagentStop then exports the subagent tree under that span directly.
+ASYNC_SUBAGENTS_KEY = "async_subagents"
+
+
+def _async_launched_agent_id(event) -> str:
+    if not isinstance(event, ToolEvent) or not isinstance(event.output, dict):
+        return ""
+    result = event.output.get("toolUseResult")
+    if not isinstance(result, dict):
+        return ""
+    if result.get("isAsync") is not True and result.get("status") != "async_launched":
+        return ""
+    agent_id = result.get("agentId")
+    return agent_id if isinstance(agent_id, str) else ""
+
+
+def _async_subagents(state) -> dict[str, dict]:
+    return _decode_pending_subagents(state.get(ASYNC_SUBAGENTS_KEY) or "")
+
+
+def _remember_async_subagents(
+    state,
+    graph,
+    span_ids: dict[str, str],
+    trace_id: str,
+    matched: dict[str, dict],
+) -> None:
+    """Record the exported Agent span of every async launch still running."""
+    launches: dict[str, dict] = {}
+    for event in graph.events:
+        if not isinstance(event, ToolEvent) or event.tool_name not in {"Agent", "Task"}:
+            continue
+        agent_id = _async_launched_agent_id(event)
+        if not agent_id and not _agent_id_from_tool(event) and event.status is EventStatus.PENDING:
+            agent_id = f"tool:{event.tool_call_id}"
+        if (
+            not agent_id
+            or agent_id in matched
+            or any(
+                graph_event.parent_event_id == event.event_id and isinstance(graph_event, AgentEvent)
+                for graph_event in graph.events
+            )
+        ):
+            continue
+        span_id = span_ids.get(event.event_id)
+        if not span_id:
+            continue
+        prompt = event.input.get("prompt") if isinstance(event.input, dict) else None
+        launches[agent_id] = {
+            "trace_id": trace_id,
+            "parent_span_id": span_id,
+            "turn_id": event.turn_id,
+            "launched_at_ms": event.started_at_ms,
+            "prompt": prompt if isinstance(prompt, str) else None,
+            "parent_tool_use_id": event.tool_call_id,
+        }
+    if not launches or state.state_file is None:
+        return
+    try:
+        with state._lock():
+            data = state._read_safe()
+            current = _decode_pending_subagents(data.get(ASYNC_SUBAGENTS_KEY, ""))
+            current.update(launches)
+            data[ASYNC_SUBAGENTS_KEY] = json.dumps(current, sort_keys=True)
+            state._write(data)
+    except Exception as exc:
+        error(f"Failed to record async subagent launches: {exc}")
+
+
+def _forget_async_subagent(state, agent_id: str) -> None:
+    if state.state_file is None:
+        return
+    try:
+        with state._lock():
+            data = state._read_safe()
+            current = _decode_pending_subagents(data.get(ASYNC_SUBAGENTS_KEY, ""))
+            current.pop(agent_id, None)
+            if current:
+                data[ASYNC_SUBAGENTS_KEY] = json.dumps(current, sort_keys=True)
+            else:
+                data.pop(ASYNC_SUBAGENTS_KEY, None)
+            data.pop(f"subagent_{agent_id}_start_time", None)
+            data.pop(f"subagent_{agent_id}_prompt", None)
+            _mark_exported_subagents(data, [agent_id])
+            state._write(data)
+    except Exception as exc:
+        error(f"Failed to clean up async subagent {agent_id}: {exc}")
+
+
+def _export_async_subagent(state, input_json: dict) -> bool:
+    """Export a background subagent under its launching Agent span.
+
+    Returns True when the subagent belongs to a recorded async launch, whether
+    or not the export succeeded, so the caller does not buffer it for a turn
+    that will never contain its Agent tool.
+    """
+    agent_id = input_json.get("agent_id")
+    if not isinstance(agent_id, str) or not agent_id:
+        return False
+    launches = _async_subagents(state)
+    launch_key = agent_id
+    launch = launches.get(agent_id)
+    if launch is None:
+        call_id = _parent_tool_use_id(input_json)
+        candidates = [
+            (key, value) for key, value in launches.items() if call_id and value.get("parent_tool_use_id") == call_id
+        ]
+        if len(candidates) == 1:
+            launch_key, launch = candidates[0]
+    if launch is None:
+        return False
+    trace_id = launch.get("trace_id")
+    parent_span_id = launch.get("parent_span_id")
+    transcript_path = input_json.get("agent_transcript_path")
+    if not isinstance(trace_id, str) or not isinstance(parent_span_id, str):
+        error(f"Invalid persisted launch relationship for subagent {agent_id}; retaining state")
+        return True
+    if not isinstance(transcript_path, str) or not Path(transcript_path).is_file():
+        return True
+
+    pending = _pending_subagents(state).get(agent_id, {})
+    ended_at_ms = pending.get("ended_at_ms") or get_timestamp_ms()
+    stored_start = str(state.get(f"subagent_{agent_id}_start_time") or "")
+    launched_at = launch.get("launched_at_ms")
+    started_at_ms = int(stored_start) if stored_start.isdigit() else launched_at
+    agent_event = AgentEvent(
+        event_id=f"agent:{agent_id}",
+        session_id=state.get("session_id") or input_json.get("session_id") or "",
+        turn_id=str(launch.get("turn_id") or ""),
+        sequence=0,
+        started_at_ms=started_at_ms if isinstance(started_at_ms, int) else None,
+        ended_at_ms=ended_at_ms,
+        status=EventStatus(pending["status"]) if pending.get("status") else _subagent_status(input_json),
+        input=launch.get("prompt") or state.get(f"subagent_{agent_id}_prompt") or None,
+        output=input_json.get("last_assistant_message") or "",
+        agent_id=agent_id,
+        source_id=input_json.get("agent_type") or "unknown",
+        error=pending.get("error") or input_json.get("error_details") or input_json.get("error") or None,
+    )
+    graph = parse_claude_transcript(Path(transcript_path), agent_event)
+    if any(item.code == "transcript_read_error" for item in graph.diagnostics):
+        return True
+    _apply_agent_outcome(graph, agent_event)
+    matched_subagents = _merge_pending_subagents(graph, _pending_subagents(state))
+    matched_observations = _merge_tool_observations(graph, ToolBuffer(state).all())
+    graph.validate()
+    if not stored_start.isdigit() and started_at_ms is not None:
+        graph.diagnostics.append(
+            GraphDiagnostic(
+                code="inferred_agent_start",
+                message="Start estimated from invoking tool observation",
+                event_id=agent_event.event_id,
+                severity="info",
+            )
+        )
+
+    user_id = state.get("user_id") or ""
+    extra = {agent_event.event_id: {"user.id": user_id}} if user_id else None
+    span_ids = launch.get("span_ids") or {}
+    for event in graph.events:
+        span_ids.setdefault(event.event_id, generate_span_id())
+    launch["span_ids"] = span_ids
+    launch.setdefault("stopped_at_ms", ended_at_ms)
+    agent_event.ended_at_ms = launch["stopped_at_ms"]
+    # Persist identities before sending so transport retries update the same spans.
+    with state._lock():
+        data = state._read_safe()
+        current = _decode_pending_subagents(data.get(ASYNC_SUBAGENTS_KEY, ""))
+        current[launch_key] = launch
+        data[ASYNC_SUBAGENTS_KEY] = json.dumps(current, sort_keys=True)
+        state._write(data)
+    payload = render_event_graph(
+        graph,
+        trace_id=trace_id,
+        service_name=SERVICE_NAME,
+        scope_name=SCOPE_NAME,
+        extra_attributes=extra,
+        span_id_overrides=span_ids,
+    )
+    for scope in payload.get("resourceSpans", [{}])[0].get("scopeSpans", []):
+        for span in scope.get("spans", []):
+            if not span.get("parentSpanId"):
+                span["parentSpanId"] = parent_span_id
+    if send_span(payload) is False:
+        error(f"Failed to export async subagent {agent_id}")
+        return True
+    _remember_async_subagents(state, graph, span_ids, trace_id, matched_subagents)
+    ToolBuffer(state).remove_many(matched_observations)
+    _cleanup_pending_subagents(state, {**matched_subagents, **({agent_id: pending} if pending else {})})
+    _forget_async_subagent(state, launch_key)
+    if launch_key != agent_id:
+        with state._lock():
+            data = state._read_safe()
+            _mark_exported_subagents(data, [agent_id])
+            data.pop(f"subagent_{agent_id}_start_time", None)
+            data.pop(f"subagent_{agent_id}_prompt", None)
+            state._write(data)
+    return True
+
+
 def _merge_pending_subagents(graph, descriptors: dict[str, dict]) -> dict[str, dict]:
-    """Insert correlated foreground agent graphs and return exported descriptors."""
+    """Resolve exact tool relationships until no additional subtree is reachable."""
     matched: dict[str, dict] = {}
-    if not descriptors or not graph.events:
+    if not graph.events:
         return matched
     root = graph.events[0]
-    for agent_id, descriptor in descriptors.items():
-        parent_tool = next(
-            (
+    remaining = dict(descriptors)
+    while remaining:
+        progressed = False
+        for agent_id, descriptor in list(remaining.items()):
+            call_id = descriptor.get("parent_tool_use_id")
+            candidates = [
                 event
                 for event in graph.events
-                if isinstance(event, ToolEvent) and _agent_id_from_tool(event) == agent_id
-            ),
-            None,
-        )
-        if parent_tool is None:
-            graph.diagnostics.append(
-                GraphDiagnostic(
-                    code="unmatched_subagent",
-                    message="Subagent descriptor had no correlated Agent tool",
-                    event_id=f"agent:{agent_id}",
-                )
+                if isinstance(event, ToolEvent)
+                and event.tool_name in {"Agent", "Task"}
+                and (event.tool_call_id == call_id if call_id else _agent_id_from_tool(event) == agent_id)
+                and _agent_id_from_tool(event) in {"", agent_id}
+                and event.agent_id != agent_id
+            ]
+            if len(candidates) != 1 or any(event.event_id == f"agent:{agent_id}" for event in graph.events):
+                continue
+            parent_tool = candidates[0]
+            agent_event = AgentEvent(
+                event_id=f"agent:{agent_id}",
+                parent_event_id=parent_tool.event_id,
+                session_id=root.session_id,
+                turn_id=root.turn_id,
+                sequence=parent_tool.sequence + 1,
+                started_at_ms=descriptor.get("started_at_ms"),
+                ended_at_ms=descriptor.get("ended_at_ms"),
+                status=EventStatus(descriptor.get("status", "completed")),
+                input=parent_tool.input.get("prompt") if isinstance(parent_tool.input, dict) else None,
+                output=descriptor.get("output"),
+                error=descriptor.get("error"),
+                agent_id=agent_id,
+                source_id=str(descriptor.get("agent_type") or "unknown"),
             )
-            continue
-        parent_event_id = parent_tool.event_id
-        agent_type = str(descriptor.get("agent_type") or "unknown")
-        agent_input = None
-        if parent_tool is not None and isinstance(parent_tool.input, dict):
-            agent_input = parent_tool.input.get("prompt")
-        agent_event = AgentEvent(
-            event_id=f"agent:{agent_id}",
-            parent_event_id=parent_event_id,
-            session_id=root.session_id,
-            turn_id=root.turn_id,
-            sequence=(parent_tool.sequence + 1) if parent_tool is not None else len(graph.events),
-            started_at_ms=descriptor.get("started_at_ms"),
-            ended_at_ms=descriptor.get("ended_at_ms"),
-            status=EventStatus.COMPLETED,
-            input=agent_input,
-            output=descriptor.get("output"),
-            agent_id=agent_id,
-            source_id=agent_type,
+            subgraph = parse_claude_transcript(Path(str(descriptor.get("transcript_path") or "")), agent_event)
+            if any(item.code == "transcript_read_error" for item in subgraph.diagnostics):
+                graph.diagnostics.extend(subgraph.diagnostics)
+                continue
+            _apply_agent_outcome(subgraph, agent_event)
+            insertion_index = graph.events.index(parent_tool) + 1
+            graph.events[insertion_index:insertion_index] = subgraph.events
+            graph.diagnostics.extend(subgraph.diagnostics)
+            matched[agent_id] = descriptor
+            remaining.pop(agent_id)
+            progressed = True
+        if not progressed:
+            break
+    for agent_id in remaining:
+        graph.diagnostics.append(
+            GraphDiagnostic(
+                code="unmatched_subagent",
+                message="Subagent has no unambiguous invoking Agent tool",
+                event_id=f"agent:{agent_id}",
+                severity="warning",
+            )
         )
-        transcript_path = Path(str(descriptor.get("transcript_path") or ""))
-        subgraph = parse_claude_transcript(transcript_path, agent_event)
-        insertion_index = graph.events.index(parent_tool) + 1 if parent_tool is not None else len(graph.events)
-        graph.events[insertion_index:insertion_index] = subgraph.events
-        graph.diagnostics.extend(subgraph.diagnostics)
-        matched[agent_id] = descriptor
     graph.validate()
     return matched
+
+
+def _apply_agent_outcome(graph, agent_event) -> None:
+    if agent_event.status is EventStatus.COMPLETED and any(
+        isinstance(event, ModelCallEvent) and event.status is EventStatus.FAILED for event in graph.events
+    ):
+        agent_event.status = EventStatus.FAILED
+        agent_event.error = "Subagent transcript records a model request failure"
+    if agent_event.status in {EventStatus.CANCELLED, EventStatus.FAILED}:
+        for event in graph.events:
+            if isinstance(event, ToolEvent) and event.status in {EventStatus.PENDING, EventStatus.RUNNING}:
+                event.status = (
+                    EventStatus.CANCELLED if agent_event.status is EventStatus.CANCELLED else EventStatus.UNKNOWN
+                )
 
 
 def _cleanup_pending_subagents(state, exported: dict[str, dict]) -> set[str]:
@@ -734,6 +1023,7 @@ def _cleanup_pending_subagents(state, exported: dict[str, dict]) -> set[str]:
                 data["pending_subagents"] = json.dumps(current, sort_keys=True)
             else:
                 data.pop("pending_subagents", None)
+            _mark_exported_subagents(data, removed)
             state._write(data)
     except Exception as exc:
         error(f"Failed to clean up exported subagents: {exc}")
@@ -772,6 +1062,7 @@ def _acknowledge_exported_turn(
                 data["pending_subagents"] = json.dumps(current_subagents, sort_keys=True)
             else:
                 data.pop("pending_subagents", None)
+            _mark_exported_subagents(data, subagents)
 
             for key in (
                 "current_trace_id",
@@ -802,9 +1093,14 @@ def _periodic_gc(trace_count: str) -> None:
         gc_stale_state_files()
 
 
-def _handle_stop(input_json: dict) -> None:
-    """Handle Stop: send the LLM span for the completed turn and clean up trace state."""
+def _handle_stop(input_json: dict, *, _failed: bool = False) -> None:
+    """Serialize export and acknowledgment across concurrent Stop hooks."""
     state = resolve_session(input_json)
+    with _export_lock(state):
+        _stop_turn(state, input_json, failed=_failed)
+
+
+def _stop_turn(state, input_json: dict, *, failed: bool = False) -> None:
     session_id = state.get("session_id")
     trace_id = state.get("current_trace_id")
     if session_id is None or trace_id is None:
@@ -844,7 +1140,8 @@ def _handle_stop(input_json: dict) -> None:
             sequence=0,
             started_at_ms=int(trace_start_time) if trace_start_time.isdigit() else None,
             ended_at_ms=get_timestamp_ms(),
-            status=EventStatus.COMPLETED,
+            status=EventStatus.FAILED if failed else EventStatus.COMPLETED,
+            error=str(input_json.get("error_details") or input_json.get("error") or "Turn failed") if failed else None,
             input=user_prompt,
             output=output,
         )
@@ -859,6 +1156,14 @@ def _handle_stop(input_json: dict) -> None:
             pending_subagents = _pending_subagents(state)
             matched_observations = _merge_tool_observations(graph, observations)
             matched_subagents = _merge_pending_subagents(graph, pending_subagents)
+            matched_ids = {item.tool_use_id for item in matched_observations}
+            matched_observations.extend(
+                _merge_tool_observations(graph, [item for item in observations if item.tool_use_id not in matched_ids])
+            )
+            if failed:
+                for event in graph.events:
+                    if isinstance(event, ToolEvent) and event.status in {EventStatus.PENDING, EventStatus.RUNNING}:
+                        event.status = EventStatus.UNKNOWN
             graph.validate()
             timestamp_candidates = [
                 int(event.ended_at_ms)
@@ -920,6 +1225,7 @@ def _handle_stop(input_json: dict) -> None:
             )
             if send_span(payload) is False:
                 return
+            _remember_async_subagents(state, graph, span_id_overrides, trace_id, matched_subagents)
             _acknowledge_exported_turn(state, trace_id, matched_observations, matched_subagents)
             _periodic_gc(trace_count)
             return
@@ -991,12 +1297,20 @@ def _handle_subagent_start(input_json: dict) -> None:
 
 
 def _handle_subagent_stop(input_json: dict) -> None:
-    """Handle subagent_stop: parse subagent transcript and send CHAIN span."""
+    """Serialize subagent completion with the launching turn's export."""
     state = resolve_session(input_json)
-    trace_id = state.get("current_trace_id")
-    if trace_id is None:
-        return
+    with _export_lock(state):
+        _stop_subagent(state, input_json)
 
+
+def _stop_subagent(state, input_json: dict) -> None:
+    agent_id = input_json.get("agent_id", "")
+    if agent_id in _exported_subagents(state):
+        return
+    # A background subagent outlives the turn that launched it: export it under
+    # that turn's Agent span, even if no turn is open now.
+    if _export_async_subagent(state, input_json):
+        return
     session_id = state.get("session_id")
     agent_id = input_json.get("agent_id", "")
     agent_type = input_json.get("agent_type", "")
@@ -1006,6 +1320,10 @@ def _handle_subagent_stop(input_json: dict) -> None:
     # SubagentStop. Buffer it until main Stop can resolve agent_id to the
     # invoking Agent tool_use_id and export one coherent tree.
     if _buffer_subagent(state, input_json, int(end_time)):
+        return
+
+    trace_id = state.get("current_trace_id")
+    if trace_id is None:
         return
 
     if not agent_type or agent_type in ("unknown", "null"):
@@ -1087,6 +1405,10 @@ def _handle_subagent_stop(input_json: dict) -> None:
 def _handle_stop_failure(input_json: dict) -> None:
     """Handle StopFailure: emit a span describing the failed turn so it doesn't disappear silently."""
     state = resolve_session(input_json)
+    transcript = resolve_transcript_path(input_json, state.get("session_id") or "")
+    if transcript is not None and _transcript_has_stable_assistant_uuid(str(transcript)):
+        _handle_stop(input_json, _failed=True)
+        return
     session_id = state.get("session_id")
     trace_id = state.get("current_trace_id")
     if session_id is None or trace_id is None:
@@ -1275,6 +1597,12 @@ def _handle_session_end(input_json: dict) -> None:
 
     error(f"Session complete: {trace_count} traces, {tool_count} tools")
     error(f"View in Arize/Phoenix: session.id = {session_id}")
+
+    # Background descendants can finish after their launching session exits.
+    # Keep their authoritative span links and any failed export for retry.
+    if _async_subagents(state) or _pending_subagents(state) or state.get("current_trace_id"):
+        log("Retaining session state for unfinished exports/subagents")
+        return
 
     # Clean up state file and lock
     if state.state_file is not None:
