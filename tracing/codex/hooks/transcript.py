@@ -164,8 +164,13 @@ def _extract_turn_from_rollout(rollout_path: Path, turn_id: str) -> "dict | None
     selected = []
     trace_count = 0
     started = False
+    initial_tier = ""
     for row in rows:
         p = row["payload"]
+        if not started and p.get("type") == "thread_settings_applied":
+            settings = p.get("thread_settings")
+            if isinstance(settings, dict) and "service_tier" in settings:
+                initial_tier = settings["service_tier"] if isinstance(settings["service_tier"], str) else "default"
         if row.get("type") == "event_msg" and p.get("type") in ("task_started", "turn_started"):
             if started:
                 break
@@ -191,6 +196,7 @@ def _extract_turn_from_rollout(rollout_path: Path, turn_id: str) -> "dict | None
         "permission_mode": "",
         "sandbox_mode": "",
         "model_provider": meta.get("model_provider"),
+        "service_tier": initial_tier,
         "token_usage": None,
         "tool_calls": [],
         "llm_calls": [],
@@ -222,6 +228,7 @@ def _extract_turn_from_rollout(rollout_path: Path, turn_id: str) -> "dict | None
                 "tool_calls": [],
                 "response_id": "",
                 "status": "unknown",
+                "service_tier": turn["service_tier"],
             }
             inputs.clear()
         active["end_ts"] = max(active["end_ts"], ts)
@@ -268,6 +275,8 @@ def _extract_turn_from_rollout(rollout_path: Path, turn_id: str) -> "dict | None
         if p.get("turn_id") not in (None, "", turn_id):
             continue
         if outer == "turn_context":
+            if isinstance(p.get("service_tier"), str):
+                turn["service_tier"] = p["service_tier"]
             for src, dst in (("model", "model"), ("cwd", "cwd"), ("approval_policy", "permission_mode")):
                 if isinstance(p.get(src), str):
                     turn[dst] = p[src]
@@ -287,7 +296,13 @@ def _extract_turn_from_rollout(rollout_path: Path, turn_id: str) -> "dict | None
             seen_usage[rid] = tokens
             close_response(ts, tokens, rid)
         elif outer == "event_msg":
-            if kind in ("task_started", "turn_started"):
+            if kind == "thread_settings_applied":
+                settings = p.get("thread_settings")
+                if isinstance(settings, dict) and "service_tier" in settings:
+                    turn["service_tier"] = (
+                        settings["service_tier"] if isinstance(settings["service_tier"], str) else "default"
+                    )
+            elif kind in ("task_started", "turn_started"):
                 start = p.get("started_at")
                 turn["turn_start_ms"] = start * 1000 if count(start) else ts
                 attr = p.get("turn_attribution")

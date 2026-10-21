@@ -105,3 +105,13 @@ activity logging. `ARIZE_DRY_RUN=true` prevents backend sends. See the main
 [environment variables](../../README.md#environment-variables) reference for
 configuration details. A local parser replay verifies reconstruction only;
 backend rendering and deployment need separate runtime evidence.
+
+## API-equivalent cost estimates
+
+The fork prices `gpt-6.1-sol` using [published API rates](https://developers.openai.com/api/docs/models/gpt-6.1-sol), dated 2026-10-21. Standard short-context rates per million tokens are $2 input, $0.10 cache read, $2.50 cache write and $10 output. Individual responses above 272,000 prompt tokens use $4, $0.20, $5 and $15. Priority/Fast multiplies these rates by 2, Flex by 0.5, and Ultrafast by 6. Input already includes cache reads/writes; output already includes reasoning. Neither is counted twice.
+
+Recorded `thread_settings_applied.thread_settings.service_tier` applies to subsequent responses. Missing tier information assumes Standard and sets `api_cost.service_tier_assumed`. Unknown models, unknown tiers and missing usage receive no invented estimate. Tool charges, regional premiums and unrecorded cache-retention premiums are outside this token estimate. These amounts represent API equivalents, not subscription charges.
+
+Phoenix currently selects pricing by model name, without service-tier or context predicates in its custom-model API. LLM spans therefore use explicit billing variants such as `gpt-6.1-sol [priority, long context]` in `llm.model_name`, retaining the exact reported model in `codex.model_name` and the observed tier in `codex.service_tier`. `api_cost.estimated_usd`, basis, source and rate date remain inspectable on each response. Other models keep their existing names and pricing.
+
+Register the eight exact-match models returned by `tracing.codex.hooks.pricing.phoenix_model_inputs()` through Phoenix's native `createModel` mutation. The returned input/output/cache prices match the exporter. Use `updateModel` for a deliberately reviewed rate change; avoid wildcard model aliases. Phoenix stores these settings on its persistent volume. Existing cost rows require explicit recalculation; legacy turn aggregates must be reconstructed from individual response records before applying long-context pricing.

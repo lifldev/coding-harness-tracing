@@ -9,6 +9,7 @@ from pathlib import Path
 from core.common import build_multi_span, build_span, env, redact_content
 from core.event_model import EventGraph, EventStatus, ModelCallEvent, ToolEvent, TurnEvent, Usage
 from tracing.codex.hooks.adapter import SCOPE_NAME, SERVICE_NAME
+from tracing.codex.hooks.pricing import RATE_DATE, RATE_SOURCE, api_pricing
 from tracing.codex.hooks.transcript import text
 
 _MAX_CONTENT_CHARS = 64 * 1024
@@ -240,6 +241,35 @@ def render_turn(thread_id: str, turn_id: str, turn: dict, identity) -> dict:
                 attrs["llm.provider"] = llm_provider
             if event.model:
                 attrs["llm.model_name"] = event.model
+                attrs["codex.model_name"] = event.model
+            tier = obs.get("service_tier", turn.get("service_tier", ""))
+            if tier:
+                attrs["codex.service_tier"] = tier
+            pricing = api_pricing(event.model or "", tier, obs.get("token_usage") or {})
+            if pricing:
+                # Phoenix selects pricing by model name, without service-tier
+                # predicates. Keep the native model separately and label the SKU.
+                attrs["llm.model_name"] = pricing["billing_model"]
+                attrs["api_cost.basis"] = "published_api_equivalent"
+                attrs["api_cost.currency"] = "USD"
+                attrs["api_cost.estimated_usd"] = pricing["cost_usd"]
+                attrs["api_cost.rate_date"] = RATE_DATE
+                attrs["api_cost.rate_source"] = RATE_SOURCE
+                attrs["api_cost.service_tier_assumed"] = not bool(tier)
+            elif event.model == "gpt-6.1-sol" and tier not in (
+                "",
+                "default",
+                "standard",
+                "priority",
+                "fast",
+                "flex",
+                "ultrafast",
+            ):
+                attrs["llm.model_name"] = event.model + " [unpriced tier]"
+                attrs["api_cost.basis"] = "unpriced_service_tier"
+            elif event.model == "gpt-6.1-sol":
+                attrs["llm.model_name"] = event.model + " [unpriced usage]"
+                attrs["api_cost.basis"] = "unpriced_usage"
             if event.source_id:
                 attrs["llm.message.id"] = event.source_id
             for source, target in TOKEN_ATTRS:
