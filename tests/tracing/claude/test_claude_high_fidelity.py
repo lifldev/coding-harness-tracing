@@ -5,6 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from core.common import StateManager
 from core.event_model import EventGraph, EventStatus, ToolEvent, TurnEvent
 from tracing.claude_code.hooks.handlers import (
@@ -16,6 +18,7 @@ from tracing.claude_code.hooks.handlers import (
     _handle_stop,
     _handle_subagent_start,
     _handle_subagent_stop,
+    _handle_user_prompt_submit,
     _merge_pending_subagents,
     _merge_tool_observations,
     _pending_subagents,
@@ -298,6 +301,170 @@ def test_legacy_post_tool_without_transcript_keeps_immediate_fallback(tmp_path: 
 
     assert len(sent) == 1
     assert _spans(sent[0])[0]["name"] == "Read"
+
+
+def _boundary_state(tmp_path):
+    state = StateManager(tmp_path, state_file=tmp_path / "state.json", lock_path=tmp_path / "state.lock")
+    state.init_state()
+    for key, value in {
+        "session_id": "session-main-1",
+        "current_trace_id": "a" * 32,
+        "current_trace_span_id": "b" * 16,
+        "current_trace_start_time": "1767268800000",
+        "current_trace_prompt": "synthetic prompt",
+        "trace_count": "1",
+        "trace_start_line": "0",
+    }.items():
+        state.set(key, value)
+    return state
+
+
+def test_prompt_boundary_preserves_observed_output_without_claiming_completion(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARIZE_LOG_PROMPTS", "true")
+    state = _boundary_state(tmp_path)
+    sent = []
+    with (
+        mock.patch("tracing.claude_code.hooks.handlers.resolve_session", return_value=state),
+        mock.patch("tracing.claude_code.hooks.handlers.ensure_session_initialized"),
+        mock.patch("tracing.claude_code.hooks.handlers.resolve_transcript_path", return_value=FIXTURE),
+        mock.patch("tracing.claude_code.hooks.handlers.send_span", side_effect=sent.append),
+    ):
+        _handle_user_prompt_submit({"prompt": "steering message", "transcript_path": str(FIXTURE)})
+
+    root = _spans(sent[0])[0]
+    attrs = _attrs(root)
+    assert root["status"]["code"] == 0
+    assert attrs["event.status"] == "unknown"
+    assert attrs["claude.closure.source"] == "UserPromptSubmit"
+    assert attrs["claude.closure.reason"] == "missing_terminal_observation"
+    assert "SYNTHETIC_TOOL_OK" in attrs["output.value"]
+    assert "fail-safe" not in attrs["output.value"]
+    assert state.get("current_trace_id") != "a" * 32
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_failed_terminal_export_retries_original_snapshot_at_next_prompt(tmp_path, monkeypatch, failed):
+    monkeypatch.setenv("ARIZE_LOG_PROMPTS", "true")
+    state = _boundary_state(tmp_path)
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(FIXTURE.read_text())
+    sent = []
+
+    def send(payload):
+        sent.append(payload)
+        return len(sent) > 1
+
+    with (
+        mock.patch("tracing.claude_code.hooks.handlers.resolve_session", return_value=state),
+        mock.patch("tracing.claude_code.hooks.handlers.ensure_session_initialized"),
+        mock.patch("tracing.claude_code.hooks.handlers.resolve_transcript_path", return_value=transcript),
+        mock.patch("tracing.claude_code.hooks.handlers.send_span", side_effect=send),
+    ):
+        _handle_stop(
+            {"last_assistant_message": "observed final answer", "error_details": "observed failure"},
+            _failed=failed,
+        )
+        assert state.get("current_trace_id") == "a" * 32
+        extra = {
+            "type": "assistant",
+            "uuid": "later-response",
+            "timestamp": "2026-01-01T12:01:00Z",
+            "message": {"role": "assistant", "id": "later-message", "model": "later-model", "content": []},
+        }
+        with transcript.open("a") as handle:
+            handle.write(json.dumps(extra) + "\n")
+        _handle_user_prompt_submit({"prompt": "next user message", "transcript_path": str(transcript)})
+
+    assert len(sent) == 2
+    assert sent[0] == sent[1]
+    root = _spans(sent[1])[0]
+    assert root["status"]["code"] == (2 if failed else 1)
+    assert _attrs(root)["output.value"] == "observed final answer"
+
+
+def test_real_stop_supersedes_unsent_inferred_boundary(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARIZE_LOG_PROMPTS", "true")
+    state = _boundary_state(tmp_path)
+    sent = []
+
+    def send(payload):
+        sent.append(payload)
+        return len(sent) > 1
+
+    with (
+        mock.patch("tracing.claude_code.hooks.handlers.resolve_session", return_value=state),
+        mock.patch("tracing.claude_code.hooks.handlers.ensure_session_initialized"),
+        mock.patch("tracing.claude_code.hooks.handlers.resolve_transcript_path", return_value=FIXTURE),
+        mock.patch("tracing.claude_code.hooks.handlers.send_span", side_effect=send),
+    ):
+        _handle_user_prompt_submit({"prompt": "steering message", "transcript_path": str(FIXTURE)})
+        assert state.get("current_trace_id") == "a" * 32
+        _handle_stop({"last_assistant_message": "observed final answer"})
+
+    assert _spans(sent[0])[0]["status"]["code"] == 0
+    root = _spans(sent[1])[0]
+    assert root["status"]["code"] == 1
+    assert _attrs(root)["output.value"] == "observed final answer"
+    assert "claude.closure.reason" not in _attrs(root)
+
+
+def test_failed_inferred_boundary_retains_later_main_responses(tmp_path):
+    state = _boundary_state(tmp_path)
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(FIXTURE.read_text())
+    sent = []
+
+    def send(payload):
+        sent.append(payload)
+        return len(sent) > 1
+
+    with (
+        mock.patch("tracing.claude_code.hooks.handlers.resolve_session", return_value=state),
+        mock.patch("tracing.claude_code.hooks.handlers.ensure_session_initialized"),
+        mock.patch("tracing.claude_code.hooks.handlers.resolve_transcript_path", return_value=transcript),
+        mock.patch("tracing.claude_code.hooks.handlers.send_span", side_effect=send),
+    ):
+        _handle_user_prompt_submit({"prompt": "first steering message", "transcript_path": str(transcript)})
+        assert state.get("current_trace_id") == "a" * 32
+        extra = {
+            "type": "assistant",
+            "uuid": "later-response",
+            "timestamp": "2026-01-01T12:01:00Z",
+            "message": {"role": "assistant", "id": "later-message", "model": "later-model", "content": []},
+        }
+        with transcript.open("a") as handle:
+            handle.write(json.dumps(extra) + "\n")
+        _handle_user_prompt_submit({"prompt": "second steering message", "transcript_path": str(transcript)})
+
+    assert any(_attrs(s).get("llm.model_name") == "later-model" for s in _spans(sent[1]))
+    assert _spans(sent[1])[0]["status"]["code"] == 0
+
+
+@pytest.mark.parametrize("message", ["observed final answer", ""])
+def test_terminal_retry_without_transcript_preserves_observed_answer(tmp_path, monkeypatch, message):
+    monkeypatch.setenv("ARIZE_LOG_PROMPTS", "true")
+    state = _boundary_state(tmp_path)
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(FIXTURE.read_text())
+    sent = []
+
+    def send(payload):
+        sent.append(payload)
+        return len(sent) > 1
+
+    with (
+        mock.patch("tracing.claude_code.hooks.handlers.resolve_session", return_value=state),
+        mock.patch("tracing.claude_code.hooks.handlers.resolve_transcript_path", return_value=transcript),
+        mock.patch("tracing.claude_code.hooks.handlers.send_span", side_effect=send),
+    ):
+        _handle_stop({"last_assistant_message": message})
+        transcript.unlink()
+        _handle_stop({})
+
+    first, retry = (_spans(payload)[0] for payload in sent)
+    assert retry["status"] == first["status"]
+    assert retry["endTimeUnixNano"] == first["endTimeUnixNano"]
+    assert _attrs(retry)["output.value"] == _attrs(first)["output.value"]
 
 
 def test_failed_export_retains_buffer_and_reuses_span_ids_on_retry(tmp_path: Path):

@@ -20,6 +20,13 @@ Turn 1 (CHAIN)
 
 All spans for a turn share one trace ID. Turns from the same Claude Code session share `session.id`. Token and cache usage is attached to the individual `LLM` call that reported it.
 
+Queued user input can start another turn trace while Claude continues working.
+Without an observed Stop or StopFailure, the previous root has unknown status;
+`claude.closure.source` and `claude.closure.reason` identify this inferred
+boundary. Its output contains only observed assistant text. A failed terminal
+export retains the original outcome, end time and transcript boundary for retry,
+so the next prompt cannot replace a real answer with a recovery message.
+
 Transcript parsing and hook observations are fail-soft. Unknown or malformed records produce diagnostics where possible; missing parents, duplicate IDs, invalid timestamps, and interrupted exports do not prevent the remaining valid graph from being emitted. If the transcript is unavailable, the integration falls back to the legacy turn export instead of inventing model-call boundaries.
 
 ### Current limitations

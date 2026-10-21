@@ -25,6 +25,7 @@ def parse_claude_transcript(
     root_event: BaseEvent,
     *,
     start_line: int = 0,
+    end_line: int | None = None,
 ) -> EventGraph:
     """Return a typed event graph for one main-agent or subagent transcript.
 
@@ -57,6 +58,8 @@ def parse_claude_transcript(
         return graph
 
     for line_index, raw_line in enumerate(lines):
+        if end_line is not None and line_index >= end_line:
+            break
         if line_index < max(0, start_line) or not raw_line.strip():
             continue
         try:
