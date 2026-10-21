@@ -325,20 +325,21 @@ class TestUserPromptSubmit:
             _handle_user_prompt_submit({"prompt": "test"})
         assert state.get("trace_start_line") == "0"
 
-    def test_failsafe_closes_orphan(self, mock_resolve, state, captured_spans):
-        """If current_trace_id already in state, sends fail-safe LLM span."""
+    def test_prompt_boundary_without_transcript_remains_unknown(self, mock_resolve, state, captured_spans):
+        """A new prompt supplies no evidence that the previous turn completed."""
         state.set("current_trace_id", "old-trace-id-00000000000000000000")
         state.set("current_trace_span_id", "old-span-1234567")
         state.set("current_trace_start_time", "999000")
         state.set("current_trace_prompt", "old prompt")
         with mock.patch("tracing.claude_code.hooks.handlers.ensure_session_initialized"):
             _handle_user_prompt_submit({"prompt": "new prompt"})
-        # Should have sent a fail-safe span
         assert len(captured_spans) == 1
         span = captured_spans[0]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
         attrs = {a["key"]: a["value"] for a in span["attributes"]}
         assert attrs["openinference.span.kind"]["stringValue"] == "LLM"
-        assert "fail-safe" in attrs["output.value"]["stringValue"]
+        assert span["status"]["code"] == 0
+        assert attrs["event.status"]["stringValue"] == "unknown"
+        assert attrs["output.value"]["stringValue"] == ""
         # New trace should be set up
         assert state.get("current_trace_id") != "old-trace-id-00000000000000000000"
 

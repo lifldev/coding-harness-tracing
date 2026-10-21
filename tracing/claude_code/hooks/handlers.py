@@ -365,15 +365,18 @@ def _handle_user_prompt_expansion(input_json: dict) -> None:
 def _handle_user_prompt_submit(input_json: dict) -> None:
     """Handle user_prompt_submit: set up a new trace (close orphaned turn first)."""
     state = resolve_session(input_json)
+    with _export_lock(state):
+        _start_turn(state, input_json)
+
+
+def _start_turn(state, input_json: dict) -> None:
     ensure_session_initialized(state, input_json)
 
     # Retry a retained turn before starting a new one.  A failed export keeps the
     # old state intact so observations and stable span IDs can be retried later.
     prev_trace_id = state.get("current_trace_id")
     if prev_trace_id:
-        retry_input = dict(input_json)
-        retry_input.setdefault("last_assistant_message", "(Turn closed by fail-safe: Stop hook did not fire)")
-        _handle_stop(retry_input)
+        _stop_turn(state, input_json, recovered=True)
         current_trace_id = state.get("current_trace_id")
         if current_trace_id == prev_trace_id:
             log("Fail-safe: retained orphaned turn after failed export")
@@ -449,6 +452,7 @@ class _TokenUsage:
 def _scan_transcript_for_usage(
     transcript: Path,
     start_line: int,
+    end_line: "int | None" = None,
 ) -> "tuple[str, _TokenUsage, str]":
     """Walk the transcript JSONL from *start_line* forward and return:
     (combined_text, usage, model_name)
@@ -468,6 +472,8 @@ def _scan_transcript_for_usage(
 
     with open(transcript, encoding="utf-8") as f:
         for i, line in enumerate(f):
+            if end_line is not None and i >= end_line:
+                break
             if i < start_line:
                 continue
             line = line.strip()
@@ -1075,6 +1081,7 @@ def _acknowledge_exported_turn(
                 "pending_command_args",
                 "pending_command_source",
                 "high_fidelity_span_ids",
+                "pending_turn_terminal",
             ):
                 data.pop(key, None)
             state._write(data)
@@ -1100,11 +1107,63 @@ def _handle_stop(input_json: dict, *, _failed: bool = False) -> None:
         _stop_turn(state, input_json, failed=_failed)
 
 
-def _stop_turn(state, input_json: dict, *, failed: bool = False) -> None:
+def _terminal_observation(state, input_json: dict, *, failed: bool, recovered: bool) -> dict:
+    """Freeze the observed boundary so transport retries cannot rewrite its outcome."""
+    trace_id = state.get("current_trace_id")
+    try:
+        saved = json.loads(state.get("pending_turn_terminal") or "null")
+    except (ValueError, TypeError):
+        saved = None
+    if (
+        isinstance(saved, dict)
+        and saved.get("trace_id") == trace_id
+        and isinstance(saved.get("input"), dict)
+        and type(saved.get("failed")) is bool
+        and type(saved.get("recovered")) is bool
+        and type(saved.get("end_time")) is int
+        and type(saved.get("end_line")) is int
+        and (saved.get("transcript_path") is None or isinstance(saved.get("transcript_path"), str))
+        and not saved["recovered"]
+    ):
+        return saved
+
+    transcript = resolve_transcript_path(input_json, state.get("session_id") or "")
+    end_line = 0
+    if transcript is not None:
+        with transcript.open("rb") as handle:
+            end_line = sum(1 for _ in handle)
+    fields = () if recovered else ("last_assistant_message", "error", "error_details")
+    observed = {
+        "trace_id": trace_id,
+        "input": {key: input_json[key] for key in fields if isinstance(input_json.get(key), str)},
+        "failed": failed,
+        "recovered": recovered,
+        "end_time": get_timestamp_ms(),
+        "end_line": end_line,
+        "transcript_path": str(transcript) if transcript is not None else None,
+    }
+    # Only terminal evidence is frozen. Failed inferred boundaries must include
+    # later records while the original trace still owns the session state.
+    if not recovered:
+        state.set("pending_turn_terminal", json.dumps(observed))
+    return observed
+
+
+def _stop_turn(state, input_json: dict, *, failed: bool = False, recovered: bool = False) -> None:
     session_id = state.get("session_id")
     trace_id = state.get("current_trace_id")
     if session_id is None or trace_id is None:
         return
+
+    observed = _terminal_observation(state, input_json, failed=failed, recovered=recovered)
+    input_json = observed["input"]
+    failed, recovered = observed["failed"], observed["recovered"]
+    end_time = observed["end_time"]
+    closure_attrs = (
+        {"claude.closure.source": "UserPromptSubmit", "claude.closure.reason": "missing_terminal_observation"}
+        if recovered
+        else {}
+    )
 
     trace_span_id = state.get("current_trace_span_id") or generate_span_id()
     trace_start_time = state.get("current_trace_start_time") or str(get_timestamp_ms())
@@ -1121,15 +1180,21 @@ def _stop_turn(state, input_json: dict, *, failed: bool = False) -> None:
     usage = _TokenUsage()
     model = ""
 
-    transcript = resolve_transcript_path(input_json, session_id)
+    transcript = Path(observed["transcript_path"]) if observed["transcript_path"] is not None else None
+    if transcript is not None and not transcript.is_file():
+        transcript = None
     if transcript is not None:
         start_line = int(state.get("trace_start_line") or "0")
-        scanned_output, usage, scanned_model = _scan_transcript_for_usage(transcript, start_line)
+        scanned_output, usage, scanned_model = _scan_transcript_for_usage(transcript, start_line, observed["end_line"])
         if not output:
             output = scanned_output
         model = scanned_model
 
-    if not output:
+    if not recovered and not last_msg and output:
+        observed["input"]["last_assistant_message"] = output
+        state.set("pending_turn_terminal", json.dumps(observed))
+
+    if not output and not recovered:
         output = "(No response)"
 
     if transcript is not None:
@@ -1139,8 +1204,8 @@ def _stop_turn(state, input_json: dict, *, failed: bool = False) -> None:
             turn_id=trace_count,
             sequence=0,
             started_at_ms=int(trace_start_time) if trace_start_time.isdigit() else None,
-            ended_at_ms=get_timestamp_ms(),
-            status=EventStatus.FAILED if failed else EventStatus.COMPLETED,
+            ended_at_ms=end_time,
+            status=EventStatus.UNKNOWN if recovered else EventStatus.FAILED if failed else EventStatus.COMPLETED,
             error=str(input_json.get("error_details") or input_json.get("error") or "Turn failed") if failed else None,
             input=user_prompt,
             output=output,
@@ -1149,6 +1214,7 @@ def _stop_turn(state, input_json: dict, *, failed: bool = False) -> None:
             transcript,
             root_event,
             start_line=int(state.get("trace_start_line") or "0"),
+            end_line=observed["end_line"],
         )
         if _has_stable_model_ids(graph):
             buffer = ToolBuffer(state)
@@ -1179,6 +1245,7 @@ def _stop_turn(state, input_json: dict, *, failed: bool = False) -> None:
             root_attrs = {
                 "trace.number": trace_count,
                 "project.name": project_name,
+                **closure_attrs,
             }
             if user_id:
                 root_attrs["user.id"] = user_id
@@ -1245,7 +1312,10 @@ def _stop_turn(state, input_json: dict, *, failed: bool = False) -> None:
         "input.value": redacted_prompt,
         "output.value": redacted_output,
         "llm.output_messages": json.dumps(output_messages),
+        **closure_attrs,
     }
+    if recovered:
+        attrs["event.status"] = EventStatus.UNKNOWN.value
     if user_id:
         attrs["user.id"] = user_id
 
@@ -1270,10 +1340,11 @@ def _stop_turn(state, input_json: dict, *, failed: bool = False) -> None:
         trace_id,
         "",
         trace_start_time,
-        str(get_timestamp_ms()),
+        str(end_time),
         attrs,
         SERVICE_NAME,
         SCOPE_NAME,
+        status_code=0 if recovered else 2 if failed else 1,
     )
     if send_span(span) is False:
         return
