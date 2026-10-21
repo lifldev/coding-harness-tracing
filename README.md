@@ -34,7 +34,7 @@ The installer registers hooks in `~/.claude/settings.json`. Start a session with
 To install from the Claude marketplace instead:
 
 ```bash
-claude plugin marketplace add Arize-ai/coding-harness-tracing
+claude plugin marketplace add lifldev/coding-harness-tracing
 claude plugin install claude-code-tracing@coding-harness-tracing
 ```
 
@@ -63,7 +63,7 @@ The installer registers hooks in `~/.cursor/hooks.json`, which applies to the Cu
 Cursor 2.5+ can install from the marketplace instead. In a Cursor agent chat, run:
 
 ```text
-/add-plugin Arize-ai/coding-harness-tracing
+/add-plugin lifldev/coding-harness-tracing
 ```
 
 The plugin skips the wizard. Run the bundled `manage-cursor-tracing` skill once to write credentials. See [Cursor plugin install](tracing/cursor/README.md#plugin-install).
