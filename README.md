@@ -17,7 +17,9 @@ Fork maintenance:
 
 Trace AI coding sessions to [Arize AX](https://arize.com) or [Phoenix](https://github.com/Arize-ai/phoenix) with [OpenInference](https://github.com/Arize-ai/openinference) spans. Each harness integration emits spans for prompts, tool calls, model responses, and session lifecycle events.
 
-Claude Code tracing reconstructs each turn as a `CHAIN` containing per-response `LLM` spans, correlated `TOOL` spans, and a foreground subagent `AGENT` subtree when available. See [Claude Code trace structure and current limitations](tracing/claude_code/README.md#trace-structure) for details.
+Claude Code tracing reconstructs each turn as a `CHAIN` with per-response `LLM` spans, correlated `TOOL` spans, and nested foreground or background `AGENT` subtrees when their transcripts are available. See [Claude Code trace structure and limitations](tracing/claude_code/README.md#trace-structure).
+
+Codex tracing reconstructs saved rollout records as a `CHAIN` with per-response `LLM` spans and `TOOL` spans. Code Mode `exec` containers include structured command executions when Codex persists them; model usage is counted once per response. See [Codex trace structure and limitations](tracing/codex/README.md).
 
 ## Quick Start
 
