@@ -1,5 +1,20 @@
 # Arize Coding Harness Tracing
 
+Maintained fork of [Arize Coding Harness Tracing](https://github.com/Arize-ai/coding-harness-tracing)
+for Claude Code and Codex sessions in Phoenix. Upstream attribution and the
+Apache-2.0 license are retained. Install and update commands below use this fork.
+
+Fork maintenance:
+
+- Keep Claude and Codex response, tool, token and subagent reconstruction covered
+  by synthetic regression fixtures. Never commit private session transcripts.
+- Validate parser changes against saved session records without making model calls.
+- Deploy a reviewed commit from a detached worktree and point runtime consumers at
+  that worktree. Preserve configuration, state, logs and a rollback environment.
+- GitHub Actions is disabled on this public fork. Owner-hosted runners must remain
+  private-only; run tests locally before publishing until an approved CI placement
+  is configured. Do not enable upstream paid triage automation.
+
 Trace AI coding sessions to [Arize AX](https://arize.com) or [Phoenix](https://github.com/Arize-ai/phoenix) with [OpenInference](https://github.com/Arize-ai/openinference) spans. Each harness integration emits spans for prompts, tool calls, model responses, and session lifecycle events.
 
 Claude Code tracing reconstructs each turn as a `CHAIN` containing per-response `LLM` spans, correlated `TOOL` spans, and a foreground subagent `AGENT` subtree when available. See [Claude Code trace structure and current limitations](tracing/claude_code/README.md#trace-structure) for details.
@@ -11,7 +26,7 @@ You need Python 3.9+ and the harness you want to trace. The commands below are t
 ### Claude Code
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Arize-ai/coding-harness-tracing/main/install.sh | bash -s -- claude
+curl -sSL https://raw.githubusercontent.com/lifldev/coding-harness-tracing/main/install.sh | bash -s -- claude
 ```
 
 The installer registers hooks in `~/.claude/settings.json`. Start a session with `claude`, or `claude -p "hello"`. Spans for that session show up in the project you chose.
@@ -28,10 +43,10 @@ That path skips the wizard, so set backend credentials in `~/.claude/settings.js
 ### Codex
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Arize-ai/coding-harness-tracing/main/install.sh | bash -s -- codex
+curl -sSL https://raw.githubusercontent.com/lifldev/coding-harness-tracing/main/install.sh | bash -s -- codex
 ```
 
-The installer registers hooks in `~/.codex/config.toml`. Codex will not run them until you trust them once: start `codex`, run `/hooks`, and approve each `arize-hook-codex-*` entry. Then run a session, for example:
+The installer registers a completion `notify` command in `~/.codex/config.toml`. At the end of each turn, it reconstructs the trace from the local Codex rollout. Then run a session, for example:
 
 ```bash
 codex exec "explain what this file does" path/to/file.py
@@ -40,7 +55,7 @@ codex exec "explain what this file does" path/to/file.py
 ### Cursor
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Arize-ai/coding-harness-tracing/main/install.sh | bash -s -- cursor
+curl -sSL https://raw.githubusercontent.com/lifldev/coding-harness-tracing/main/install.sh | bash -s -- cursor
 ```
 
 The installer registers hooks in `~/.cursor/hooks.json`, which applies to the Cursor IDE and the Cursor CLI for your user. Use either as usual; agent activity produces spans in the project you chose.
