@@ -37,6 +37,8 @@ def _isolate_sessions_root(tmp_path, monkeypatch):
     import tracing.codex.hooks.handlers as h
 
     monkeypatch.setattr(h, "_CODEX_SESSIONS_ROOT", tmp_path / "sessions")
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr("tracing.codex.hooks.delivery._STATE_DIR", tmp_path / "delivery")
     return tmp_path
 
 
@@ -503,7 +505,8 @@ class TestExtractTurnFromRollout:
         assert len(turn["tool_calls"]) == 1
         tc = turn["tool_calls"][0]
         assert tc["tool"] == "web_search"
-        assert tc["call_id"] == "ws_1"
+        # An end event without a shared durable ID cannot establish a parent/call link.
+        assert tc["call_id"] == ""
         assert tc["args"] == "weather"
         assert tc["output"] == "completed"
 
@@ -652,28 +655,30 @@ class TestBuildAndSendSpans:
 
         assert len(sent) == 1
         spans = sent[0]["resourceSpans"][0]["scopeSpans"][0]["spans"]
-        assert len(spans) == 2  # parent + 1 child
+        assert len(spans) == 3  # turn + response + tool
 
         parent_attrs = _attrs_of_span(spans[0])
         assert parent_attrs["input.value"]["stringValue"] == "hi"
         assert parent_attrs["output.value"]["stringValue"] == "hello"
-        assert parent_attrs["llm.model_name"]["stringValue"] == "gpt-5.5"
+        response_attrs = _attrs_of_span(spans[1])
+        assert response_attrs["llm.model_name"]["stringValue"] == "gpt-5.5"
         assert parent_attrs["llm.system"]["stringValue"] == "openai"
         assert parent_attrs["llm.provider"]["stringValue"] == "openai"
         assert parent_attrs["codex.approval_mode"]["stringValue"] == "on-request"
         assert parent_attrs["codex.sandbox_mode"]["stringValue"] == "workspace-write"
         assert parent_attrs["codex.cwd"]["stringValue"] == "/x/workspace"
         assert parent_attrs["codex.workspace"]["stringValue"] == "workspace"
-        assert parent_attrs["llm.token_count.total"]["intValue"] == 15
-        assert parent_attrs["llm.token_count.prompt_details.cache_read"]["intValue"] == 8
-        assert parent_attrs["llm.token_count.prompt_details.cache_write"]["intValue"] == 2
-        assert parent_attrs["llm.token_count.completion_details.reasoning"]["intValue"] == 1
+        assert "llm.token_count.total" not in parent_attrs
+        assert response_attrs["llm.token_count.total"]["intValue"] == 15
+        assert response_attrs["llm.token_count.prompt_details.cache_read"]["intValue"] == 8
+        assert response_attrs["llm.token_count.prompt_details.cache_write"]["intValue"] == 2
+        assert response_attrs["llm.token_count.completion_details.reasoning"]["intValue"] == 1
         assert parent_attrs["llm.input_messages.0.message.role"]["stringValue"] == "user"
         assert parent_attrs["llm.input_messages.0.message.content"]["stringValue"] == "hi"
         assert parent_attrs["llm.output_messages.0.message.role"]["stringValue"] == "assistant"
         assert parent_attrs["llm.output_messages.0.message.content"]["stringValue"] == "hello"
 
-        child_attrs = _attrs_of_span(spans[1])
+        child_attrs = _attrs_of_span(spans[2])
         assert child_attrs["tool.name"]["stringValue"] == "exec_command"
         assert child_attrs["tool.id"]["stringValue"] == "c1"
         assert child_attrs["codex.tool.call_id"]["stringValue"] == "c1"
@@ -687,7 +692,7 @@ class TestBuildAndSendSpans:
         not a nested AGENT trace. tool.id is the call_id; input.value is the
         raw argument string, including the nested model field.
 
-        TODO: monitor how #114 affects this"""
+        Native lineage additionally requires authoritative child metadata."""
         spawn_args = '{"model": "gpt-5.4", "prompt": "investigate the bug"}'
         turn = {
             "trace_count": 1,
@@ -718,8 +723,8 @@ class TestBuildAndSendSpans:
             _build_and_send_spans("sess-1", "turn-1", turn)
 
         spans = sent[0]["resourceSpans"][0]["scopeSpans"][0]["spans"]
-        assert len(spans) == 2  # parent + 1 child
-        child = spans[1]
+        assert len(spans) == 3  # turn + response + tool
+        child = spans[2]
         assert child["name"] == "spawn_agent"
         child_attrs = _attrs_of_span(child)
         assert child_attrs["openinference.span.kind"]["stringValue"] == "TOOL"
@@ -767,7 +772,7 @@ class TestBuildAndSendSpans:
         with patcher:
             _build_and_send_spans("sess-1", "turn-1", turn)
         parent_attrs = _attrs_of_span(sent[0]["resourceSpans"][0]["scopeSpans"][0]["spans"][0])
-        assert parent_attrs["output.value"]["stringValue"] == "(No response)"
+        assert parent_attrs["output.value"]["stringValue"] == ""
 
     def test_zero_token_counts_kept_unobserved_fields_absent(self):
         """Observed zero prompt/completion/total survive as intValue 0; a
@@ -794,7 +799,7 @@ class TestBuildAndSendSpans:
         sent, patcher = self._send_capture()
         with patcher:
             _build_and_send_spans("sess-1", "turn-1", turn)
-        parent_attrs = _attrs_of_span(sent[0]["resourceSpans"][0]["scopeSpans"][0]["spans"][0])
+        parent_attrs = _attrs_of_span(sent[0]["resourceSpans"][0]["scopeSpans"][0]["spans"][1])
         assert parent_attrs["llm.token_count.prompt"]["intValue"] == 0
         assert parent_attrs["llm.token_count.completion"]["intValue"] == 0
         assert parent_attrs["llm.token_count.total"]["intValue"] == 0
@@ -1062,12 +1067,13 @@ class TestHandleNotify:
 
         assert len(sent) == 1
         spans = sent[0]["resourceSpans"][0]["scopeSpans"][0]["spans"]
-        assert len(spans) == 2  # parent + 1 tool child
+        assert len(spans) == 3  # turn + response + tool
         parent_attrs = _attrs_of_span(spans[0])
         assert parent_attrs["input.value"]["stringValue"] == "do something"
         assert parent_attrs["output.value"]["stringValue"] == "done"
-        assert parent_attrs["llm.token_count.total"]["intValue"] == 6
-        child_attrs = _attrs_of_span(spans[1])
+        assert "llm.token_count.total" not in parent_attrs
+        assert _attrs_of_span(spans[1])["llm.token_count.total"]["intValue"] == 6
+        child_attrs = _attrs_of_span(spans[2])
         assert child_attrs["tool.name"]["stringValue"] == "exec_command"
 
 

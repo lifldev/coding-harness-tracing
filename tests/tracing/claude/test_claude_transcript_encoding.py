@@ -123,7 +123,7 @@ def test_parse_claude_transcript_under_non_utf8_locale(transcript: Path):
     with _non_utf8_locale():
         graph = parse_claude_transcript(transcript, root)
 
-    assert not graph.diagnostics
+    assert not [item for item in graph.diagnostics if item.severity != "info"]
     models = [e for e in graph.events if isinstance(e, ModelCallEvent)]
     assert len(models) == 1
     assert models[0].output == NON_ASCII_TEXT

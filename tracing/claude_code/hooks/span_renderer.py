@@ -49,11 +49,31 @@ def render_event_graph(
     payloads: list[dict] = []
     graph_start = _first_timestamp(graph.events, "started_at_ms")
     graph_end = _last_timestamp(graph.events, "ended_at_ms") or graph_start
+    inferred_starts = {item.event_id for item in graph.diagnostics if item.code == "inferred_model_start"}
+    inferred_agent_starts = {item.event_id for item in graph.diagnostics if item.code == "inferred_agent_start"}
 
     for index, event in enumerate(graph.events):
         if isinstance(event, ModelCallEvent):
             model_call_number += 1
         name, kind, attrs = _span_fields(event, model_call_number)
+        if isinstance(event, ModelCallEvent):
+            attrs["llm.timing.start_source"] = (
+                "inferred_previous_conversation_record"
+                if event.event_id in inferred_starts
+                else "observed_assistant_record" if event.started_at_ms is not None else "unavailable"
+            )
+            attrs["llm.timing.end_source"] = (
+                "observed_assistant_record" if event.ended_at_ms is not None else "unavailable"
+            )
+        if isinstance(event, AgentEvent):
+            attrs["subagent.timing.start_source"] = (
+                "inferred_launch_tool"
+                if event.event_id in inferred_agent_starts
+                else "observed_subagent_start" if event.started_at_ms is not None else "unavailable"
+            )
+            attrs["subagent.timing.end_source"] = (
+                "observed_subagent_stop" if event.ended_at_ms is not None else "unavailable"
+            )
         attrs.update(extras.get(event.event_id, {}))
         parent_span_id = first_span_by_event_id.get(safe_parent_ids[index] or "", "")
         start_ms = _safe_timestamp(event.started_at_ms, graph_start)
@@ -85,6 +105,7 @@ def _span_fields(event: BaseEvent, model_call_number: int) -> tuple[str, str, di
     attrs: dict[str, Any] = {
         "session.id": event.session_id,
         "turn.id": event.turn_id,
+        "event.status": event.status.value,
     }
 
     if isinstance(event, TurnEvent):
@@ -196,7 +217,7 @@ def _status(event: BaseEvent) -> tuple[int, str]:
     message = redact_content(allowed, event.error) if event.error else ""
     if event.status is EventStatus.FAILED:
         return 2, message or "Event failed"
-    if event.status in {EventStatus.PENDING, EventStatus.RUNNING, EventStatus.UNKNOWN}:
+    if event.status in {EventStatus.PENDING, EventStatus.RUNNING, EventStatus.UNKNOWN, EventStatus.CANCELLED}:
         return 0, message
     return 1, message
 

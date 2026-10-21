@@ -117,6 +117,7 @@ class TestSubagentStopWithStoredState:
         state.set("current_trace_id", "t" * 32)
         state.set("current_trace_span_id", "s" * 16)
 
+        original_stat = Path.stat
         real_stat = Path(transcript_file).stat()
         mock_stat = mock.MagicMock(wraps=real_stat)
         mock_stat.st_birthtime = 1700000.0
@@ -125,7 +126,14 @@ class TestSubagentStopWithStoredState:
         with mock.patch(
             "tracing.claude_code.hooks.handlers.resolve_transcript_path", return_value=Path(transcript_file)
         ):
-            with mock.patch.object(Path, "stat", return_value=mock_stat):
+            with mock.patch.object(
+                Path,
+                "stat",
+                autospec=True,
+                side_effect=lambda path, *args, **kwargs: (
+                    mock_stat if path == Path(transcript_file) else original_stat(path, *args, **kwargs)
+                ),
+            ):
                 _handle_subagent_stop(
                     {"agent_type": "explorer", "agent_id": "a2", "agent_transcript_path": transcript_file}
                 )

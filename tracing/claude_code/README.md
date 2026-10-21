@@ -4,7 +4,7 @@ Automatic [OpenInference](https://github.com/Arize-ai/openinference) tracing for
 
 ## Trace structure
 
-Each user turn is represented as a `CHAIN` with a separate `LLM` span for every model response. Tool calls are correlated by Claude's `tool_use_id` and parented to the model response that requested them. A foreground subagent is represented as an `AGENT` below its invoking tool, with its own model and tool spans.
+Each user turn is represented as a `CHAIN` with a separate `LLM` span for every model response. Tool calls are correlated by Claude's `tool_use_id` and parented to the model response that requested them. Subagents are represented as `AGENT` spans below their invoking tools, with their own model and tool spans. Background agents retain the launching turn's trace and parent tool even when they finish after that turn; nested and concurrent agents use explicit agent IDs or adjacent transcript metadata's `toolUseId` to resolve their parents.
 
 ```text
 Turn 1 (CHAIN)
@@ -24,7 +24,10 @@ Transcript parsing and hook observations are fail-soft. Unknown or malformed rec
 
 ### Current limitations
 
-- One foreground subagent is correlated into the main turn. Nested, background, cancelled, and concurrently running subagents are not yet reconstructed as complete subtrees.
+- Subagent reconstruction requires a readable child transcript and an unambiguous invoking tool, identified by the structured launch result's `agentId`, an explicit parent tool ID, or the child transcript's adjacent `.meta.json` `toolUseId`. Unmatched descriptors are retained; parent relationships are never guessed from timing, prompt text, or launch order.
+- A subagent that never emits `SubagentStop`, or disappears without a recorded failure/cancellation signal, cannot be reconstructed as a completed subtree. Explicit failed/cancelled/interrupted outcomes and transcript API errors are preserved; missing tool results remain incomplete. A successful stop hook alone does not reveal an unrecorded earlier interruption.
+- Claude transcript timestamps record response arrival, not model request dispatch. Model starts estimated from the preceding conversation boundary include possible local processing; `llm.timing.start_source` marks this inference, and `llm.timing.end_source` identifies the observed response record. Subagent timestamps use start/stop hooks when available; a launch-tool fallback is marked by `subagent.timing.start_source`.
+- Export snapshots are serialized per session. Retries reuse persisted span IDs, and repeated completion hooks are acknowledged once while session state exists. A process crash between remote acceptance and local acknowledgment is not an exactly-once delivery guarantee; exporter/backend retry semantics still apply. Pending state survives `SessionEnd`, but missing completion hooks are not retried by a background scheduler.
 - High-fidelity model/tool parenting depends on a readable Claude transcript. The no-transcript fallback remains intentionally less detailed.
 - Unknown future Claude transcript schemas are handled fail-soft, but may produce partial graphs until fixtures and parser support are updated.
 
@@ -55,7 +58,7 @@ For Phoenix, swap the Arize keys for `PHOENIX_ENDPOINT` (and optional `PHOENIX_A
 Install:
 
 ```bash
-claude plugin marketplace add Arize-ai/coding-harness-tracing
+claude plugin marketplace add lifldev/coding-harness-tracing
 claude plugin install claude-code-tracing@coding-harness-tracing
 ```
 
@@ -63,7 +66,7 @@ Uninstall:
 
 ```bash
 claude plugin uninstall claude-code-tracing@coding-harness-tracing
-claude plugin marketplace remove Arize-ai/coding-harness-tracing
+claude plugin marketplace remove lifldev/coding-harness-tracing
 ```
 
 ### Remote setup
@@ -73,13 +76,13 @@ claude plugin marketplace remove Arize-ai/coding-harness-tracing
 Install:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Arize-ai/coding-harness-tracing/main/install.sh | bash -s -- claude
+curl -sSL https://raw.githubusercontent.com/lifldev/coding-harness-tracing/main/install.sh | bash -s -- claude
 ```
 
 Uninstall:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Arize-ai/coding-harness-tracing/main/install.sh | bash -s -- uninstall claude
+curl -sSL https://raw.githubusercontent.com/lifldev/coding-harness-tracing/main/install.sh | bash -s -- uninstall claude
 ```
 
 #### Windows (PowerShell)
@@ -87,21 +90,21 @@ curl -sSL https://raw.githubusercontent.com/Arize-ai/coding-harness-tracing/main
 Install:
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/Arize-ai/coding-harness-tracing/main/install.bat -OutFile $env:TEMP\install.bat
+iwr -useb https://raw.githubusercontent.com/lifldev/coding-harness-tracing/main/install.bat -OutFile $env:TEMP\install.bat
 & $env:TEMP\install.bat claude
 ```
 
 Uninstall:
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/Arize-ai/coding-harness-tracing/main/install.bat -OutFile $env:TEMP\install.bat
+iwr -useb https://raw.githubusercontent.com/lifldev/coding-harness-tracing/main/install.bat -OutFile $env:TEMP\install.bat
 & $env:TEMP\install.bat uninstall claude
 ```
 
 ### Local setup
 
 ```bash
-git clone https://github.com/Arize-ai/coding-harness-tracing.git
+git clone https://github.com/lifldev/coding-harness-tracing.git
 cd coding-harness-tracing
 ```
 

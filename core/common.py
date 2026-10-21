@@ -644,21 +644,36 @@ def _inject_openinference_project_resource_attr(span_dict: dict, project_name: s
 
 
 def _post_otlp(url: str, body: bytes, headers: dict, label: str) -> bool:
-    """POST an encoded OTLP payload, logging failures. Returns True on 2xx."""
+    """POST one payload with bounded retries for transient transport failures."""
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return 200 <= resp.status < 300
-    except urllib.error.HTTPError as e:
+    if not req.has_header("User-agent"):
+        req.add_header("User-Agent", "LiFl-Coding-Harness-Tracing/1.0")
+    for attempt in range(3):
         try:
-            detail = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            detail = ""
-        error(f"{label} send failed: HTTP {e.code}: {detail or e.reason}")
-        return False
-    except Exception as e:
-        error(f"{label} send failed: {e}")
-        return False
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return 200 <= resp.status < 300
+        except urllib.error.HTTPError as e:
+            try:
+                detail = e.read(8192).decode("utf-8", errors="replace")
+            except Exception:
+                detail = ""
+            finally:
+                e.close()
+            message = f"HTTP {e.code}: {detail or e.reason}"
+            retryable = e.code in (429, 502, 503, 504)
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            message = str(e)
+            retryable = True
+        except Exception as e:
+            message = str(e)
+            retryable = False
+        if not retryable or attempt == 2:
+            error(f"{label} send failed: {message}")
+            return False
+        # Reuse the encoded payload and IDs if the collector accepted a request
+        # whose acknowledgement was lost, so it can deduplicate the retry.
+        time.sleep(0.25 * (2**attempt))
+    return False
 
 
 def _extract_span_name(span_dict: dict) -> str:
