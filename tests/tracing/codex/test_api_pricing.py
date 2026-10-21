@@ -83,3 +83,13 @@ def test_unknown_tier_cannot_match_phoenix_standard_prices(tmp_path):
         assert "api_cost.estimated_usd" not in a
         assert a["codex.model_name"] == "gpt-6.1-sol"
         assert not any(re.search(p["namePattern"], a["llm.model_name"]) for p in phoenix_model_inputs())
+
+
+def test_partial_usage_cannot_match_phoenix_standard_prices():
+    from tracing.codex.hooks.pricing import phoenix_model_inputs
+
+    turn = {"model": "gpt-6.1-sol", "llm_calls": [{"token_usage": {"prompt_tokens": 100}}]}
+    llm = next(attrs(s) for s in spans(turn) if attrs(s)["openinference.span.kind"] == "LLM")
+    assert llm["api_cost.basis"] == "unpriced_usage"
+    assert "api_cost.estimated_usd" not in llm
+    assert not any(re.search(p["namePattern"], llm["llm.model_name"]) for p in phoenix_model_inputs())

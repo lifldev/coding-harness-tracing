@@ -267,6 +267,9 @@ def render_turn(thread_id: str, turn_id: str, turn: dict, identity) -> dict:
             ):
                 attrs["llm.model_name"] = event.model + " [unpriced tier]"
                 attrs["api_cost.basis"] = "unpriced_service_tier"
+            elif event.model == "gpt-6.1-sol":
+                attrs["llm.model_name"] = event.model + " [unpriced usage]"
+                attrs["api_cost.basis"] = "unpriced_usage"
             if event.source_id:
                 attrs["llm.message.id"] = event.source_id
             for source, target in TOKEN_ATTRS:
