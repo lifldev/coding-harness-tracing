@@ -15,6 +15,22 @@ Fork maintenance:
   private-only; run tests locally before publishing until an approved CI placement
   is configured. Do not enable upstream paid triage automation.
 
+Work-context export uses top-level `project_routes` (an ordered list such as
+`[{"owner": "ExampleClient", "project": "client"}]`) and `default_project` (for example
+`"personal"`) in `~/.arize/harness/config.json`. Backend-specific project environment
+overrides win, followed by the first case-insensitive origin-owner route, the
+default, then the harness `project_name`. Git failures fall through silently;
+lookups have a one-second timeout and an in-process session cache.
+
+Every exported span carries known string attributes `work.client`, `work.repo`,
+`work.branch`, `work.ticket`, `work.pr`, `work.run_id`, `agent.harness`, `agent.role`,
+`agent.host`, `gen_ai.agent.name` and `gen_ai.provider.name`. The same keys except
+`gen_ai.*` merge into OpenInference `metadata`. Ticket precedence is
+`HARNESS_TICKET`, `AUTOLOOP_TICKET_ID`, then the first branch ticket (upper-cased).
+`HARNESS_PR` supplies the PR; `HARNESS_RUN_ID` precedes `HARNESS_TRACE_CONTEXT.runId`.
+`HARNESS_AGENT_ROLE` accepts coordinator, worker, reviewer, qa or interactive;
+otherwise Autoloop/trace-context sessions are workers and others interactive.
+
 Trace AI coding sessions to [Arize AX](https://arize.com) or [Phoenix](https://github.com/Arize-ai/phoenix) with [OpenInference](https://github.com/Arize-ai/openinference) spans. Each harness integration emits spans for prompts, tool calls, model responses, and session lifecycle events.
 
 Claude Code tracing reconstructs each turn as a `CHAIN` with per-response `LLM` spans, correlated `TOOL` spans, and nested foreground or background `AGENT` subtrees when their transcripts are available. See [Claude Code trace structure and limitations](tracing/claude_code/README.md#trace-structure).

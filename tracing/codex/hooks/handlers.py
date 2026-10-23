@@ -216,6 +216,8 @@ def _send_legacy_single_span(thread_id: str, turn_id: str, input_json: dict) -> 
         # No rollout here, so the real model/provider is unknown.
         "llm.system": "codex",
     }
+    if isinstance(input_json.get("cwd"), str) and input_json["cwd"]:
+        attrs["codex.cwd"] = input_json["cwd"]
     user_id = env.get_user_id(SERVICE_NAME)
     if user_id:
         attrs["user.id"] = user_id

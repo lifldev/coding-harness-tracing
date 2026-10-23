@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import IO, Optional, TextIO
 
 from core.otlp_proto import otlp_json_to_protobuf
+from core.work_context import enrich_payload, git_context, session_context
 
 # ---------------------------------------------------------------------------
 # Environment helper — reads tracing-related env vars with defaults
@@ -446,7 +447,9 @@ def get_target() -> str:
     return "none"
 
 
-def resolve_project_name(target: str, harness_cfg: dict, fallback: str = "") -> str:
+def resolve_project_name(
+    target: str, harness_cfg: dict, fallback: str = "", *, config: "dict | None" = None, repo: str = ""
+) -> str:
     """Resolve the project name for a resolved backend target.
 
     The env override is framework-scoped so a value configured for one backend
@@ -459,7 +462,8 @@ def resolve_project_name(target: str, harness_cfg: dict, fallback: str = "") -> 
     Code installer historically baked into ``settings.json`` is ignored — see
     GitHub issue #74.
 
-    Precedence: framework env var > ``harness_cfg['project_name']`` > fallback.
+    Precedence: framework env var > first owner route > default_project >
+    ``harness_cfg['project_name']`` > fallback.
     """
     if target == "phoenix":
         env_override = env.phoenix_project_name
@@ -468,7 +472,21 @@ def resolve_project_name(target: str, harness_cfg: dict, fallback: str = "") -> 
     else:
         env_override = env.project_name or env.phoenix_project_name
     cfg_val = harness_cfg.get("project_name", "") if isinstance(harness_cfg, dict) else ""
-    return env_override or cfg_val or fallback
+    cfg = config if isinstance(config, dict) else {}
+    routes = cfg.get("project_routes", [])
+    owner = repo.partition("/")[0]
+    if owner and isinstance(routes, list):
+        for route in routes:
+            if (
+                isinstance(route, dict)
+                and isinstance(route.get("owner"), str)
+                and route["owner"].casefold() == owner.casefold()
+                and isinstance(route.get("project"), str)
+                and route["project"]
+            ):
+                return env_override or route["project"]
+    default = cfg.get("default_project")
+    return env_override or (default if isinstance(default, str) else "") or cfg_val or fallback
 
 
 def resolve_backend(span_dict: dict) -> dict:
@@ -529,7 +547,9 @@ def resolve_backend(span_dict: dict) -> dict:
     # Resolve project_name (target-aware): framework env var > config > service_name.
     # Env override is framework-scoped so ARIZE_PROJECT_NAME can't shadow a Phoenix
     # project (and vice versa) — see resolve_project_name / issue #74.
-    project_name = resolve_project_name(target, harness_cfg, service_name)
+    harness, session_id, cwd = session_context(span_dict)
+    repo = git_context(harness, session_id, cwd).get("work.repo", "")
+    project_name = resolve_project_name(target, harness_cfg, service_name, config=cfg, repo=repo)
 
     if not target:
         error(
@@ -705,6 +725,7 @@ def send_span(span_dict: dict) -> bool:
 
         backend = resolve_backend(span_dict)
         target = backend["target"]
+        span_dict = enrich_payload(span_dict, backend["project_name"])
 
         if target == "phoenix":
             project = backend["project_name"]
