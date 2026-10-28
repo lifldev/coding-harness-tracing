@@ -1,0 +1,136 @@
+# Design
+
+This contract is shared by three repositories: this fork (Claude Code and Codex
+exporters), `lifldev/agent-harness` (QA exporter) and `lifldev/infra`
+(Phoenix, rollup, dashboards). Names below are the interface; change them in
+all three together.
+
+## Project routing
+
+Resolved once per session from the session working directory:
+
+1. `PHOENIX_PROJECT_NAME` / `ARIZE_PROJECT_NAME` still win (fork validation
+   sets `sandbox`).
+2. Otherwise the `origin` remote of the git repository containing the working
+   directory is parsed to `owner/name`. The first `project_routes` entry whose
+   `owner` matches case-insensitively selects the project.
+3. Otherwise `default_project`, then the harness `project_name`.
+
+Configuration in `~/.arize/harness/config.json`, top level so every harness
+shares it:
+
+```json
+"project_routes": [{"owner": "ExampleClient", "project": "client"}],
+"default_project": "personal"
+```
+
+Git lookups use `git -C <cwd>` with a short timeout and are cached per
+session. Failure falls through to the default and never drops a span.
+
+## Span attributes
+
+Set on every span, omitted when unknown. String values only.
+
+| Attribute | Source |
+|---|---|
+| `work.client` | the routed project (`client`, `personal`, `sandbox`) |
+| `work.repo` | `owner/name` from the origin remote |
+| `work.branch` | current branch |
+| `work.ticket` | `HARNESS_TICKET`, else `AUTOLOOP_TICKET_ID`, else the first `[A-Za-z]{2,10}-\d+` in the branch, upper-cased |
+| `work.pr` | `HARNESS_PR` |
+| `work.run_id` | `HARNESS_RUN_ID`, else `runId` from `HARNESS_TRACE_CONTEXT` |
+| `agent.harness` | `claude-code`, `codex`, `harness-qa` |
+| `agent.role` | `HARNESS_AGENT_ROLE` if one of `coordinator`, `worker`, `reviewer`, `qa`, `interactive`; else `worker` when `AUTOLOOP_TICKET_ID` or `HARNESS_TRACE_CONTEXT` is set; else `interactive` |
+| `agent.host` | short hostname |
+| `gen_ai.agent.name` | same as `agent.harness` |
+| `gen_ai.provider.name` | `anthropic` or `openai` |
+
+The same keys, minus the `gen_ai.*` pair, are written as a JSON object in the
+OpenInference `metadata` attribute, so Phoenix filters read
+`metadata['work.ticket'] == 'AB-894'`. Existing `metadata` keys are merged,
+not replaced.
+
+## Retention and storage
+
+Phoenix trace retention policies: `client` 30 days, `personal` 14 days,
+`sandbox` 2 days, Default 2 days (retires the old per-harness projects). At
+the measured ~285 MiB/day this stays under 10GiB; the volume grows to 40Gi for
+headroom and backups. Policies are set through the Phoenix REST API and
+recorded in the infra tenant README.
+
+## Hourly totals
+
+A sidecar in the Phoenix pod opens `/data/phoenix.db` read-only and, every
+15 minutes, recomputes the last 6 closed hours. It writes samples stamped at
+the hour start to `vmsingle-agentwork` (2-year retention,
+`-dedup.minScrapeInterval=1h`, so a rerun replaces rather than duplicates).
+Reading SQLite avoids a new API credential and uses Phoenix's own computed
+span costs; the pinned Phoenix image makes the schema a reviewed dependency,
+and the sidecar logs and skips on schema mismatch.
+
+Metrics, one sample per hour per label set. Labels: `project`, `client`,
+`repo`, `harness`, `role`, `host`, plus recorded `model`, `effort`, `tier`,
+`execution` and `trigger` where applicable. Ticket/run/PR IDs stay in Phoenix.
+
+| Metric | Meaning |
+|---|---|
+| `agentwork_cost_usd` | Phoenix span cost |
+| `agentwork_tokens` | prompt/completion/cache and known reasoning/non_reasoning subsets |
+| `agentwork_llm_calls` | LLM spans |
+| `agentwork_tool_calls` / `agentwork_tool_errors` | TOOL spans / those with error status |
+| `agentwork_turns` | root spans |
+| `agentwork_root_elapsed_seconds` | summed root span duration; includes waits and overlap, not active work |
+| `agentwork_sessions` | distinct `session.id` with a root span starting in the hour |
+
+Dashboards use `sum_over_time(...[$__range])` grouped by label. Hourly snapshots
+use increasing revision timestamps within the same hour, persisted with their
+label inventory before import; newer corrections supersede older values and
+missing series become zero. Equal-timestamp maximum-value deduplication is not
+an overwrite mechanism. Late repair is bounded to the last six closed hours.
+
+## Comparable measurements
+
+Response completion, background-agent settlement and accepted task completion are
+different events. Keep original parentage and root boundaries. Never divide all
+descendant tokens by foreground-root duration or call summed roots active hours.
+
+Both coding exporters emit these optional response attributes, without changing
+the original span timing. Unknown values are omitted, including unknown reasoning
+tokens; zero remains a valid observed value.
+
+| Attribute | Meaning |
+|---|---|
+| `llm.reasoning_effort` | recorded effort, never inferred from model name |
+| `llm.service_tier` | recorded tier/speed, never an assumed billing tier |
+| `llm.token_count.completion_details.reasoning` | recorded reasoning/thinking tokens, already included in completion |
+| `llm.token_count.completion_details.non_reasoning` | completion minus reasoning, only when both are known and consistent |
+| `llm.response_cycle.duration_ms` | latest observed tool result to the next completed model response |
+| `llm.response_cycle.start_source` | `observed_tool_result` |
+| `llm.response_cycle.end_source` | observed assistant/usage record, as appropriate |
+
+Deduplicate native response IDs and final usage snapshots. New user prompts and
+turn boundaries invalidate a pending tool-result boundary. Concurrent results
+advance the boundary only before a new response starts. Response cycles exclude
+tool execution but include scheduling, prefill, reasoning and transport; they are
+not provider latency or decoding speed. Request/first-token/last-token timings
+remain absent unless directly observed with compatible native semantics.
+
+Roots carry `turn.trigger` and `turn.trigger_source`: human, task_notification,
+orchestration_notification, goal_check, continuation or unknown. Transcript-marker
+classification is best effort and marked as such; it is never an authority signal.
+Native asynchronous launches carry `agent.execution=background`; foreground and
+unknown are kept distinct. Root metadata may report latest observed descendant
+activity separately, without claiming task acceptance or extending the root.
+
+Rollups retain response-cycle seconds and eligible completion tokens from exactly
+the same LLM spans. Group by recorded effort/tier and trigger where relevant;
+show eligible/unknown counts. Tokens with no cycle must never enter a throughput
+numerator. Count only TOOL executions, not code-mode CHAIN wrappers. Display
+tool errors as observed operation errors, not failed-task or usefulness rates.
+Long-lived metrics use bounded aggregate labels; ticket/run/PR drill-down remains
+in Phoenix rather than creating an unbounded time-series label set.
+
+QA/controller outcomes may be carried only from existing authoritative structured
+results, tagged with their stage/scope and provenance. A completed model response
+must never synthesize a successful task outcome. CI/merge ingestion and additional
+credentials remain out of scope; missing outcomes are shown as unknown.

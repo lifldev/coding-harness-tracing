@@ -8,6 +8,7 @@ from pathlib import Path
 
 from core.common import build_multi_span, build_span, env, redact_content
 from core.event_model import EventGraph, EventStatus, ModelCallEvent, ToolEvent, TurnEvent, Usage
+from core.measurements import trigger_measurements
 from tracing.codex.hooks.adapter import SCOPE_NAME, SERVICE_NAME
 from tracing.codex.hooks.pricing import RATE_DATE, RATE_SOURCE, api_pricing
 from tracing.codex.hooks.transcript import text
@@ -117,7 +118,7 @@ def build_graph(thread_id: str, turn_id: str, turn: dict) -> tuple[EventGraph, d
                 input=call.get("input_parts"),
                 output=call.get("assistant_output"),
                 source_id=call.get("response_id") or None,
-                model=turn.get("model"),
+                model=call.get("model") or turn.get("model"),
                 usage=model_usage,
             )
         )
@@ -190,6 +191,8 @@ def render_turn(thread_id: str, turn_id: str, turn: dict, identity) -> dict:
             "project.name": project,
             "codex.status": event.status.value,
         }
+        attrs.update(trigger_measurements(turn.get("user_prompt")))
+        attrs["agent.execution"] = "unknown" if turn.get("turn_attribution", {}).get("parent_turn_id") else "foreground"
         if env.get_user_id(SERVICE_NAME):
             attrs["user.id"] = env.get_user_id(SERVICE_NAME)
         if cwd:
@@ -197,6 +200,7 @@ def render_turn(thread_id: str, turn_id: str, turn: dict, identity) -> dict:
             attrs["codex.workspace"] = Path(cwd).name[:4096]
         if isinstance(event, TurnEvent):
             kind, name = "CHAIN", f"Turn {turn.get('trace_count') or 1}"
+            attrs.update(trigger_measurements(turn.get("user_prompt")))
             attrs.update(
                 {
                     "trace.number": str(turn.get("trace_count") or 1),
@@ -226,6 +230,7 @@ def render_turn(thread_id: str, turn_id: str, turn: dict, identity) -> dict:
                     attrs[target] = turn[source]
         elif isinstance(event, ModelCallEvent):
             kind, name = "LLM", f"LLM response: {event.source_id or event.sequence}"
+            attrs.update(obs.get("measurements") or {})
             parts = event.input or []
             attrs["input.value"] = content(
                 True,

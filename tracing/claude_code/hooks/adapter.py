@@ -4,6 +4,7 @@
 Replaces claude-code-tracing/hooks/common.sh (107 lines). Owns Claude-specific
 session logic; individual hook events are handled by handlers.py.
 """
+
 import os
 import platform
 import subprocess
@@ -12,6 +13,7 @@ from typing import Optional
 
 from core.common import StateManager, env, generate_trace_id, get_timestamp_ms, log, redirect_stderr_to_log_file
 from core.constants import HARNESSES, STATE_BASE_DIR
+from core.work_context import register_session_cwd
 
 # --- Module-level constants derived from HARNESSES ---
 _HARNESS = HARNESSES["claude-code"]
@@ -110,6 +112,11 @@ def resolve_session(input_json: dict) -> StateManager:
         lock_path=lock_path,
     )
     sm.init_state()
+    cwd = sm.get("work_context_cwd") or input_json.get("cwd", "")
+    if isinstance(cwd, str) and cwd:
+        if not sm.get("work_context_cwd"):
+            sm.set("work_context_cwd", cwd)
+        register_session_cwd(SERVICE_NAME, sm.get("session_id") or session_key, cwd)
     return sm
 
 
@@ -144,6 +151,7 @@ def ensure_session_initialized(state: StateManager, input_json: dict) -> None:
         project_name = os.path.basename(cwd) if cwd else os.path.basename(os.getcwd())
 
     state.set("session_id", session_id)
+    register_session_cwd(SERVICE_NAME, session_id, state.get("work_context_cwd") or input_json.get("cwd", ""))
     state.set("session_start_time", str(get_timestamp_ms()))
     state.set("project_name", project_name)
     state.set("trace_count", "0")

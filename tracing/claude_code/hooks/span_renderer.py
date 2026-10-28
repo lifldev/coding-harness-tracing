@@ -51,11 +51,38 @@ def render_event_graph(
     graph_end = _last_timestamp(graph.events, "ended_at_ms") or graph_start
     inferred_starts = {item.event_id for item in graph.diagnostics if item.code == "inferred_model_start"}
     inferred_agent_starts = {item.event_id for item in graph.diagnostics if item.code == "inferred_agent_start"}
+    by_id = {event.event_id: event for event in graph.events}
+    execution = {}
+    for agent in (event for event in graph.events if isinstance(event, AgentEvent)):
+        parent = by_id.get(agent.parent_event_id)
+        result = parent.output if isinstance(parent, ToolEvent) and isinstance(parent.output, dict) else {}
+        result = result.get("toolUseResult", result)
+        result = result if isinstance(result, dict) else {}
+        execution[agent.agent_id] = (
+            "background"
+            if result.get("isAsync") is True or result.get("status") == "async_launched"
+            else "foreground" if result.get("isAsync") is False else "unknown"
+        )
+    trigger = {
+        key: value
+        for key, value in (graph.events[0].measurements if graph.events else {}).items()
+        if key.startswith("turn.trigger")
+    }
 
     for index, event in enumerate(graph.events):
         if isinstance(event, ModelCallEvent):
             model_call_number += 1
         name, kind, attrs = _span_fields(event, model_call_number)
+        attrs.update(event.measurements)
+        attrs.update(trigger)
+        attrs["agent.execution"] = execution.get(
+            getattr(event, "agent_id", None), "unknown" if getattr(event, "agent_id", None) else "foreground"
+        )
+        if isinstance(event, TurnEvent):
+            attrs["agent.execution"] = "foreground"
+            if graph_end is not None and event.started_at_ms is not None:
+                attrs["work.observed_elapsed_ms"] = max(0, graph_end - event.started_at_ms)
+                attrs["work.observed_elapsed_source"] = "latest_observed_descendant"
         if isinstance(event, ModelCallEvent):
             attrs["llm.timing.start_source"] = (
                 "inferred_previous_conversation_record"

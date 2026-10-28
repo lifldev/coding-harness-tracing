@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.measurements import response_measurements, trigger_measurements
+
 from core.event_model import (
     AgentEvent,
     BaseEvent,
@@ -35,6 +37,7 @@ def parse_claude_transcript(
     """
 
     graph = EventGraph([root_event])
+    root_event.measurements.update(trigger_measurements(root_event.input))
     parser_diagnostics: list[GraphDiagnostic] = []
     tools_by_call_id: dict[str, ToolEvent] = {}
     models_by_message_id: dict[str, ModelCallEvent] = {}
@@ -44,6 +47,11 @@ def parse_claude_transcript(
     # conversation boundary is an estimate that can include local processing.
     request_ms = _valid_ms(root_event.started_at_ms)
     seen_record_ids: set[str] = set()
+    cycle_boundary = None
+    cycle_starts = {}
+    cycle_generations = {}
+    usage_snapshots = {}
+    cycle_generation = 0
 
     try:
         lines = transcript.read_text(encoding="utf-8").splitlines()
@@ -127,6 +135,9 @@ def parse_claude_transcript(
             # stay one-event-per-record (also preserves assistant-line-* ids).
             model_event = models_by_message_id.get(message_id) if message_id else None
             if model_event is None:
+                cycle_starts[message_id or event_id] = cycle_boundary
+                cycle_generations[message_id or event_id] = cycle_generation
+                cycle_boundary = None
                 started_at_ms = timestamp_ms
                 if timestamp_ms is not None and request_ms is not None and request_ms <= timestamp_ms:
                     started_at_ms = request_ms
@@ -177,6 +188,36 @@ def parse_claude_transcript(
             if entry.get("isApiErrorMessage") is True or message.get("stop_reason") == "error":
                 model_event.status = EventStatus.FAILED
                 model_event.error = _string(entry.get("error")) or _assistant_text(content) or "Model request failed"
+            snapshot = usage_snapshots.setdefault(message_id or event_id, {})
+            for key, value in (
+                ("effort", entry.get("effort") or entry.get("perTurnEffort")),
+                ("usage", message.get("usage")),
+            ):
+                if value is not None:
+                    snapshot[key] = value
+            raw_usage = snapshot.get("usage") if isinstance(snapshot.get("usage"), dict) else {}
+            details = (
+                raw_usage.get("output_tokens_details")
+                if isinstance(raw_usage.get("output_tokens_details"), dict)
+                else {}
+            )
+            model_event.measurements = response_measurements(
+                snapshot.get("effort"),
+                raw_usage.get("speed") or raw_usage.get("service_tier"),
+                raw_usage.get("output_tokens"),
+                details.get("thinking_tokens"),
+                (
+                    cycle_starts.get(message_id or event_id)
+                    if cycle_generations.get(message_id or event_id) == cycle_generation
+                    else None
+                ),
+                timestamp_ms,
+                "observed_assistant_record",
+            )
+            if model_event.status is not EventStatus.COMPLETED:
+                model_event.measurements = {
+                    k: v for k, v in model_event.measurements.items() if not k.startswith("llm.response_cycle.")
+                }
             if timestamp_ms is not None:
                 request_ms = timestamp_ms
 
@@ -218,6 +259,12 @@ def parse_claude_transcript(
 
         elif role == "user":
             result_timestamp_ms = _timestamp_ms(entry.get("timestamp"))
+            blocks = _content_blocks(message.get("content"))
+            cycle_boundary = (
+                result_timestamp_ms if any(block.get("type") == "tool_result" for block in blocks) else None
+            )
+            if not any(block.get("type") == "tool_result" for block in blocks):
+                cycle_generation += 1
             if result_timestamp_ms is not None:
                 request_ms = result_timestamp_ms
             for block in _content_blocks(message.get("content")):
