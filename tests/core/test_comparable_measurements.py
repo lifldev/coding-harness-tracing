@@ -22,6 +22,51 @@ def write_rows(tmp_path, rows):
     return path
 
 
+@pytest.mark.parametrize(
+    "value,known", [(0, True), (4200, True), (None, False), (True, False), (-1, False), (1.5, False), ("12", False)]
+)
+def test_native_ttft_is_matching_turn_only_and_keeps_zero(tmp_path, value, known):
+    rows = [
+        {"type": "event_msg", "timestamp": stamp(1), "payload": {"type": "task_started", "turn_id": "t"}},
+        {
+            "type": "event_msg",
+            "timestamp": stamp(2),
+            "payload": {"type": "task_complete", "turn_id": "other", "time_to_first_token_ms": 99},
+        },
+        {
+            "type": "event_msg",
+            "timestamp": stamp(5),
+            "payload": {"type": "task_complete", "turn_id": "t", "time_to_first_token_ms": value},
+        },
+        {
+            "type": "event_msg",
+            "timestamp": stamp(6),
+            "payload": {"type": "task_complete", "turn_id": "t", "time_to_first_token_ms": 999},
+        },
+    ]
+    turn = _extract_turn_from_rollout(write_rows(tmp_path, rows), "t")
+    measurements = turn.get("measurements", {})
+    assert ("turn.time_to_first_token_ms" in measurements) is known
+    if known:
+        assert measurements["turn.time_to_first_token_ms"] == value
+        payload = render_turn("session", "t", turn, lambda *_: ("openai", "openai"))
+        spans = [s for rs in payload["resourceSpans"] for scope in rs["scopeSpans"] for s in scope["spans"]]
+        measured = [s for s in spans if any(a["key"] == "turn.time_to_first_token_ms" for a in s["attributes"])]
+        assert len(measured) == 1
+        assert measured[0].get("parentSpanId", "") == ""
+
+
+@pytest.mark.parametrize("completion", [None, {"type": "task_complete"}, {"type": "task_complete", "turn_id": "other"}])
+def test_missing_or_unmatched_completion_has_no_ttft(tmp_path, completion):
+    rows = [{"type": "event_msg", "timestamp": stamp(1), "payload": {"type": "task_started", "turn_id": "t"}}]
+    if completion is not None:
+        rows.append(
+            {"type": "event_msg", "timestamp": stamp(5), "payload": dict(completion, time_to_first_token_ms=20)}
+        )
+    turn = _extract_turn_from_rollout(write_rows(tmp_path, rows), "t")
+    assert "turn.time_to_first_token_ms" not in turn.get("measurements", {})
+
+
 @pytest.mark.parametrize("interrupt,omit_usage", [(False, False), (True, False), (False, True)])
 def test_claude_cycle_coalesces_final_usage_without_inventing_reasoning(tmp_path, interrupt, omit_usage):
     rows = [

@@ -334,6 +334,12 @@ def _extract_turn_from_rollout(rollout_path: Path, turn_id: str) -> "dict | None
                 turn["turn_attribution"] = attr if isinstance(attr, dict) else {}
             elif kind in ("task_complete", "task_completed"):
                 turn["status"] = "completed"
+                ttft = p.get("time_to_first_token_ms")
+                if p.get("turn_id") == turn_id and count(ttft):
+                    turn["measurements"] = {
+                        "turn.time_to_first_token_ms": ttft,
+                        "turn.time_to_first_token_source": "native_task_complete",
+                    }
                 if isinstance(p.get("last_agent_message"), str):
                     turn["assistant_output"] = p["last_agent_message"]
                 if count(p.get("completed_at")):

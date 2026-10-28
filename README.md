@@ -42,6 +42,12 @@ and non-reasoning token counts, estimated turn triggers and optional post-tool
 response cycles. `llm.response_cycle.duration_ms` measures the latest observed
 tool result to response completion, including thinking, prefill and transport;
 it is not decoding speed or provider latency. Unknown measurements are omitted.
+Codex's native `task_complete.time_to_first_token_ms` is preserved only on its
+matching turn root as `turn.time_to_first_token_ms`, with
+`turn.time_to_first_token_source=native_task_complete`. This native-reported
+turn measurement does not establish the provider's timer boundary or first
+visible text. Claude's saved transcript has no equivalent field; missing TTFT
+stays unknown, and turn TTFT is never copied to individual model responses.
 Background descendants retain their launching trace and can outlive its root:
 never divide all descendant tokens by a foreground response duration. See the
 [measurement contract](openspec/changes/2026-10-24-work-context-traces/design.md).

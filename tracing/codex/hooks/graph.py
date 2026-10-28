@@ -200,6 +200,7 @@ def render_turn(thread_id: str, turn_id: str, turn: dict, identity) -> dict:
             attrs["codex.workspace"] = Path(cwd).name[:4096]
         if isinstance(event, TurnEvent):
             kind, name = "CHAIN", f"Turn {turn.get('trace_count') or 1}"
+            attrs.update(turn.get("measurements") or {})
             attrs.update(trigger_measurements(turn.get("user_prompt")))
             attrs.update(
                 {
