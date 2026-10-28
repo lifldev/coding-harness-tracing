@@ -78,7 +78,54 @@ Metrics, one sample per hour per label set. Labels: `project`, `client`,
 | `agentwork_llm_calls` | LLM spans |
 | `agentwork_tool_calls` / `agentwork_tool_errors` | TOOL spans / those with error status |
 | `agentwork_turns` | root spans |
-| `agentwork_active_seconds` | summed root span duration |
+| `agentwork_root_elapsed_seconds` | summed root span duration; includes waits and overlap, not active work |
 | `agentwork_sessions` | distinct `session.id` with a root span starting in the hour |
 
 Dashboards use `sum_over_time(...[$__range])` grouped by label.
+
+## Comparable measurements
+
+Response completion, background-agent settlement and accepted task completion are
+different events. Keep original parentage and root boundaries. Never divide all
+descendant tokens by foreground-root duration or call summed roots active hours.
+
+Both coding exporters emit these optional response attributes, without changing
+the original span timing. Unknown values are omitted, including unknown reasoning
+tokens; zero remains a valid observed value.
+
+| Attribute | Meaning |
+|---|---|
+| `llm.reasoning_effort` | recorded effort, never inferred from model name |
+| `llm.service_tier` | recorded tier/speed, never an assumed billing tier |
+| `llm.token_count.completion_details.reasoning` | recorded reasoning/thinking tokens, already included in completion |
+| `llm.token_count.completion_details.non_reasoning` | completion minus reasoning, only when both are known and consistent |
+| `llm.response_cycle.duration_ms` | latest observed tool result to the next completed model response |
+| `llm.response_cycle.start_source` | `observed_tool_result` |
+| `llm.response_cycle.end_source` | observed assistant/usage record, as appropriate |
+
+Deduplicate native response IDs and final usage snapshots. New user prompts and
+turn boundaries invalidate a pending tool-result boundary. Concurrent results
+advance the boundary only before a new response starts. Response cycles exclude
+tool execution but include scheduling, prefill, reasoning and transport; they are
+not provider latency or decoding speed. Request/first-token/last-token timings
+remain absent unless directly observed with compatible native semantics.
+
+Roots carry `turn.trigger` and `turn.trigger_source`: human, task_notification,
+orchestration_notification, goal_check, continuation or unknown. Transcript-marker
+classification is best effort and marked as such; it is never an authority signal.
+Native asynchronous launches carry `agent.execution=background`; foreground and
+unknown are kept distinct. Root metadata may report latest observed descendant
+activity separately, without claiming task acceptance or extending the root.
+
+Rollups retain response-cycle seconds and eligible completion tokens from exactly
+the same LLM spans. Group by recorded effort/tier and trigger where relevant;
+show eligible/unknown counts. Tokens with no cycle must never enter a throughput
+numerator. Count only TOOL executions, not code-mode CHAIN wrappers. Display
+tool errors as observed operation errors, not failed-task or usefulness rates.
+Long-lived metrics use bounded aggregate labels; ticket/run/PR drill-down remains
+in Phoenix rather than creating an unbounded time-series label set.
+
+QA/controller outcomes may be carried only from existing authoritative structured
+results, tagged with their stage/scope and provenance. A completed model response
+must never synthesize a successful task outcome. CI/merge ingestion and additional
+credentials remain out of scope; missing outcomes are shown as unknown.
