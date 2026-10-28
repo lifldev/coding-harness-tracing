@@ -69,19 +69,24 @@ span costs; the pinned Phoenix image makes the schema a reviewed dependency,
 and the sidecar logs and skips on schema mismatch.
 
 Metrics, one sample per hour per label set. Labels: `project`, `client`,
-`repo`, `ticket`, `harness`, `role`, `host`, plus `model` on LLM metrics.
+`repo`, `harness`, `role`, `host`, plus recorded `model`, `effort`, `tier`,
+`execution` and `trigger` where applicable. Ticket/run/PR IDs stay in Phoenix.
 
 | Metric | Meaning |
 |---|---|
 | `agentwork_cost_usd` | Phoenix span cost |
-| `agentwork_tokens` | `kind` = `prompt`, `completion`, `cache_read`, `cache_write` |
+| `agentwork_tokens` | prompt/completion/cache and known reasoning/non_reasoning subsets |
 | `agentwork_llm_calls` | LLM spans |
 | `agentwork_tool_calls` / `agentwork_tool_errors` | TOOL spans / those with error status |
 | `agentwork_turns` | root spans |
 | `agentwork_root_elapsed_seconds` | summed root span duration; includes waits and overlap, not active work |
 | `agentwork_sessions` | distinct `session.id` with a root span starting in the hour |
 
-Dashboards use `sum_over_time(...[$__range])` grouped by label.
+Dashboards use `sum_over_time(...[$__range])` grouped by label. Hourly snapshots
+use increasing revision timestamps within the same hour, persisted with their
+label inventory before import; newer corrections supersede older values and
+missing series become zero. Equal-timestamp maximum-value deduplication is not
+an overwrite mechanism. Late repair is bounded to the last six closed hours.
 
 ## Comparable measurements
 

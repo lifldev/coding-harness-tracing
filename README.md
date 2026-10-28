@@ -37,6 +37,15 @@ Claude Code tracing reconstructs each turn as a `CHAIN` with per-response `LLM` 
 
 Codex tracing reconstructs saved rollout records as a `CHAIN` with per-response `LLM` spans and `TOOL` spans. Code Mode `exec` containers include structured command executions when Codex persists them; model usage is counted once per response. See [Codex trace structure and limitations](tracing/codex/README.md).
 
+Claude and Codex expose recorded reasoning effort/service tier, known reasoning
+and non-reasoning token counts, estimated turn triggers and optional post-tool
+response cycles. `llm.response_cycle.duration_ms` measures the latest observed
+tool result to response completion, including thinking, prefill and transport;
+it is not decoding speed or provider latency. Unknown measurements are omitted.
+Background descendants retain their launching trace and can outlive its root:
+never divide all descendant tokens by a foreground response duration. See the
+[measurement contract](openspec/changes/2026-10-24-work-context-traces/design.md).
+
 ## Quick Start
 
 You need Python 3.9+ and the harness you want to trace. The commands below are the three most common installs on macOS and Linux. Each one downloads the installer, asks where to send spans (Phoenix or [Arize AX](https://arize.com)), then writes credentials to `~/.arize/harness/config.json`. For Windows commands and the rest of the supported harnesses, see [Supported Harnesses](#supported-harnesses).

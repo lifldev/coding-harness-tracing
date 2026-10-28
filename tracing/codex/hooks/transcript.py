@@ -15,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
+from core.measurements import response_measurements
+
 # Reading is streamed, but hard budgets keep notify latency and memory bounded
 # for malformed, very large, or concurrently growing rollout files.
 _MAX_ROLLOUT_BYTES = 64 << 20  # 64 MiB
@@ -165,9 +167,13 @@ def _extract_turn_from_rollout(rollout_path: Path, turn_id: str) -> "dict | None
     trace_count = 0
     started = False
     initial_tier = ""
+    initial_effort = ""
     for row in rows:
         p = row["payload"]
         if not started and p.get("type") == "thread_settings_applied":
+            settings = p.get("thread_settings")
+            if isinstance(settings, dict) and isinstance(settings.get("reasoning_effort"), str):
+                initial_effort = settings["reasoning_effort"]
             settings = p.get("thread_settings")
             if isinstance(settings, dict) and "service_tier" in settings:
                 initial_tier = settings["service_tier"] if isinstance(settings["service_tier"], str) else "default"
@@ -197,6 +203,7 @@ def _extract_turn_from_rollout(rollout_path: Path, turn_id: str) -> "dict | None
         "sandbox_mode": "",
         "model_provider": meta.get("model_provider"),
         "service_tier": initial_tier,
+        "reasoning_effort": initial_effort,
         "token_usage": None,
         "tool_calls": [],
         "llm_calls": [],
@@ -212,12 +219,13 @@ def _extract_turn_from_rollout(rollout_path: Path, turn_id: str) -> "dict | None
     seen_usage: dict = {}
     previous_total = None
     active: dict | None = None
+    cycle_boundary = None
     search_ends: dict = {}
     inputs: list = []
     open_wrappers: list = []
 
     def response(ts: int) -> dict:
-        nonlocal active
+        nonlocal active, cycle_boundary
         if active is None:
             active = {
                 "start_ts": ts,
@@ -229,7 +237,11 @@ def _extract_turn_from_rollout(rollout_path: Path, turn_id: str) -> "dict | None
                 "response_id": "",
                 "status": "unknown",
                 "service_tier": turn["service_tier"],
+                "reasoning_effort": turn["reasoning_effort"],
+                "model": turn["model"],
+                "cycle_start": cycle_boundary,
             }
+            cycle_boundary = None
             inputs.clear()
         active["end_ts"] = max(active["end_ts"], ts)
         return active
@@ -241,6 +253,15 @@ def _extract_turn_from_rollout(rollout_path: Path, turn_id: str) -> "dict | None
             token_usage=tokens or None, response_id=response_id, status="completed", end_ts=max(ts, call["end_ts"])
         )
         calls.append(call)
+        call["measurements"] = response_measurements(
+            call.get("reasoning_effort"),
+            call.get("service_tier"),
+            tokens.get("completion_tokens"),
+            tokens.get("reasoning_output_tokens"),
+            call.get("cycle_start"),
+            ts,
+            "observed_usage_record",
+        )
         active = None
 
     def add_tool(name: str, args: object, cid: str, ts: int, output=None, owner=None) -> dict:
@@ -275,6 +296,8 @@ def _extract_turn_from_rollout(rollout_path: Path, turn_id: str) -> "dict | None
         if p.get("turn_id") not in (None, "", turn_id):
             continue
         if outer == "turn_context":
+            if isinstance(p.get("effort"), str):
+                turn["reasoning_effort"] = p["effort"]
             if isinstance(p.get("service_tier"), str):
                 turn["service_tier"] = p["service_tier"]
             for src, dst in (("model", "model"), ("cwd", "cwd"), ("approval_policy", "permission_mode")):
@@ -298,6 +321,8 @@ def _extract_turn_from_rollout(rollout_path: Path, turn_id: str) -> "dict | None
         elif outer == "event_msg":
             if kind == "thread_settings_applied":
                 settings = p.get("thread_settings")
+                if isinstance(settings, dict) and isinstance(settings.get("reasoning_effort"), str):
+                    turn["reasoning_effort"] = settings["reasoning_effort"]
                 if isinstance(settings, dict) and "service_tier" in settings:
                     turn["service_tier"] = (
                         settings["service_tier"] if isinstance(settings["service_tier"], str) else "default"
@@ -318,6 +343,9 @@ def _extract_turn_from_rollout(rollout_path: Path, turn_id: str) -> "dict | None
             elif kind in ("turn_aborted", "task_interrupted", "task_failed"):
                 turn["status"] = "failed" if kind == "task_failed" else "cancelled"
             elif kind == "user_message" and isinstance(p.get("message"), str):
+                cycle_boundary = None
+                if active is not None:
+                    active["cycle_start"] = None
                 turn["user_prompt"] = p["message"]
                 if not inputs or inputs[-1] != {"kind": "prompt", "value": p["message"]}:
                     inputs.append({"kind": "prompt", "value": p["message"]})
@@ -452,6 +480,7 @@ def _extract_turn_from_rollout(rollout_path: Path, turn_id: str) -> "dict | None
                     if cid in search_ends:
                         entry["end_ts"] = max(ts, search_ends[cid][0])
             elif kind in ("function_call_output", "custom_tool_call_output", "tool_search_output"):
+                cycle_boundary = ts if ts > 0 and active is None else None
                 entry = pending.get(cid)
                 output = p.get("tools") if kind == "tool_search_output" else p.get("output")
                 if entry is not None:
@@ -480,6 +509,9 @@ def _extract_turn_from_rollout(rollout_path: Path, turn_id: str) -> "dict | None
             elif kind in ("message", "agent_message"):
                 msg = message(p)
                 if p.get("role") == "user":
+                    cycle_boundary = None
+                    if active is not None:
+                        active["cycle_start"] = None
                     turn["user_prompt"] = msg
                     part = {"kind": "prompt", "value": msg}
                     if not inputs or inputs[-1] != part:

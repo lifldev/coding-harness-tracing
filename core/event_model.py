@@ -77,6 +77,7 @@ class BaseEvent:
     error: Optional[str] = None
     input: Any = None
     output: Any = None
+    measurements: Dict[str, Any] = field(default_factory=dict)
 
     event_type: ClassVar[str] = "event"
 
