@@ -281,6 +281,14 @@ Claude Code, Codex, Copilot, Gemini, and Antigravity take an event name. Cursor,
 
 A mistyped harness or event exits 0, so it never blocks the harness, and is written to the log described under `ARIZE_LOG_FILE` below.
 
+### Verifying Phoenix delivery
+
+Phoenix queries can briefly lag a successful ingestion acknowledgment. Query the
+expected project by exact trace or session ID and allow a bounded visibility
+delay before declaring delivery failed. Verify replay against the same span IDs
+and span count. An initially empty query is not a reason to generate new IDs or
+rerun the model; use the saved session records to verify delivery.
+
 ### Environment variables
 
 Most settings live in `.arize/harness/config.json`, but a small set of env vars affect runtime behavior on every harness. The installers wire most of these for you; set them yourself when you want to override behavior for a single session or debug locally.

@@ -41,6 +41,15 @@ replay reconciles it. There is no background retry scheduler.
 Each snapshot includes the newest 64 closed turns; older delivered spans remain
 in the backend, and delayed initial replay is bounded to those latest turns.
 
+## Verifying native hook discovery
+
+Grok Build 1.0.70's `grok inspect` can omit global native hook files, including
+`~/.grok/hooks/arize-tracing.json`. An empty inspect list alone does not prove
+the hooks failed to load. Initialize an ACP connection, create or load a session,
+then query `_x.ai/hooks/list` with its `sessionId`. Check that the five
+`global/arize-tracing` entries exist and have `disabled: false`.
+This discovery check needs no `session/prompt` request or model call.
+
 ## Measurement boundaries
 
 The CHAIN turn contains TOOL children keyed by native call IDs. Native tool
