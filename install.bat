@@ -43,12 +43,12 @@ if /i "%~1"=="--wheel-dir" (
 )
 if /i "%~1"=="--branch" ( set "INSTALL_BRANCH=%~2" & set "TARBALL_URL=https://github.com/lifldev/coding-harness-tracing/archive/refs/heads/%~2.tar.gz" & shift & shift & goto :parse_args )
 
-for %%C in (claude codex copilot cursor gemini kiro antigravity opencode omp devin) do if /i "%~1"=="%%C" ( set "COMMAND=%%C" & shift & goto :parse_args )
+for %%C in (claude codex grok copilot cursor gemini kiro antigravity opencode omp devin) do if /i "%~1"=="%%C" ( set "COMMAND=%%C" & shift & goto :parse_args )
 if /i "%~1"=="update" ( set "COMMAND=update" & shift & goto :parse_args )
 if /i "%~1"=="status" ( set "COMMAND=status" & shift & goto :parse_args )
 if /i "%~1"=="uninstall" (
     set "COMMAND=uninstall" & shift
-    for %%C in (claude codex copilot cursor gemini kiro antigravity opencode omp devin) do if /i "%~1"=="%%C" ( set "UNINSTALL_HARNESS=%%C" & shift )
+    for %%C in (claude codex grok copilot cursor gemini kiro antigravity opencode omp devin) do if /i "%~1"=="%%C" ( set "UNINSTALL_HARNESS=%%C" & shift )
     goto :parse_args
 )
 echo [arize] Unknown argument: %~1 >&2
@@ -289,6 +289,7 @@ set "HARNESS_DIR="
 if /i "%~1"=="claude"      set "HARNESS_DIR=tracing\claude_code"
 if /i "%~1"=="claude-code" set "HARNESS_DIR=tracing\claude_code"
 if /i "%~1"=="codex"       set "HARNESS_DIR=tracing\codex"
+if /i "%~1"=="grok"        set "HARNESS_DIR=tracing\grok"
 if /i "%~1"=="copilot"     set "HARNESS_DIR=tracing\copilot"
 if /i "%~1"=="cursor"      set "HARNESS_DIR=tracing\cursor"
 if /i "%~1"=="gemini"      set "HARNESS_DIR=tracing\gemini"
@@ -311,6 +312,7 @@ echo   Commands:
 echo     claude              Install tracing for Claude Code / Agent SDK
 echo     codex               Install tracing for OpenAI Codex CLI
 echo     copilot             Install tracing for GitHub Copilot
+echo     grok                Install native Grok Build tracing
 echo     cursor              Install tracing for Cursor IDE
 echo     gemini              Install tracing for Gemini CLI
 echo     kiro                Install tracing for Kiro CLI

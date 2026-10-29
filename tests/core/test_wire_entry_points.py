@@ -51,6 +51,8 @@ EXPECTED_HARNESS_ENTRY_POINTS = {
     "arize-hook-permission-denied": "tracing.claude_code.hooks.handlers:permission_denied",
     # Codex hooks
     "arize-hook-codex-notify": "tracing.codex.hooks.handlers:notify",
+    # Native Grok hook
+    "arize-hook-grok": "tracing.grok.hooks.handlers:main",
     # Copilot hooks
     "arize-hook-copilot-session-start": "tracing.copilot.hooks.handlers:session_start",
     "arize-hook-copilot-user-prompt": "tracing.copilot.hooks.handlers:user_prompt_submitted",

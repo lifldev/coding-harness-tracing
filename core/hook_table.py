@@ -69,6 +69,7 @@ EVENT_HOOKS: Dict[str, Dict[str, str]] = {
 # Harnesses with a single handler that takes no event argument. Everything
 # after the harness name is passed through to the handler.
 SINGLE_HOOKS: Dict[str, str] = {
+    "grok": "tracing.grok.hooks.handlers:main",
     "cursor": "tracing.cursor.hooks.handlers:main",
     "kiro": "tracing.kiro.hooks.handlers:main",
     "opencode": "tracing.opencode.hooks.handlers:main",

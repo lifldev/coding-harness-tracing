@@ -231,6 +231,7 @@ harness_dir() {
     case "$1" in
         claude|claude-code)  echo "tracing/claude_code" ;;
         codex)   echo "tracing/codex" ;;
+        grok)    echo "tracing/grok" ;;
         copilot) echo "tracing/copilot" ;;
         cursor)  echo "tracing/cursor" ;;
         gemini)  echo "tracing/gemini" ;;
@@ -273,6 +274,7 @@ Commands:
   claude      Install and configure tracing for Claude Code / Agent SDK
   codex       Install and configure tracing for OpenAI Codex CLI
   copilot     Install and configure tracing for GitHub Copilot (VS Code + CLI)
+  grok        Install and configure native Grok Build tracing
   cursor      Install and configure tracing for Cursor IDE
   gemini      Install and configure tracing for Gemini CLI
   kiro        Install and configure tracing for Kiro CLI
@@ -359,7 +361,7 @@ main() {
     done
 
     case "$cmd" in
-        claude|codex|copilot|cursor|gemini|kiro|antigravity|opencode|omp|devin)
+        claude|codex|grok|copilot|cursor|gemini|kiro|antigravity|opencode|omp|devin)
             install_harness "$cmd" "$with_skills"
             ;;
         uninstall)
