@@ -48,12 +48,12 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] in {"install", "uninstall"}:
         from core.config import load_config
         from core.setup import (
-            VENV_DIR,
             dry_run,
             info,
             prompt_backend,
             prompt_project_name,
             remove_harness_entry,
+            venv_bin,
             write_config,
         )
 
@@ -73,7 +73,7 @@ def main():
                 write_config(backend, credentials, "grok", project)
         with tempfile.TemporaryDirectory(prefix="grok-hook-stage-") as directory:
             stage = Path(directory) / "arize-tracing.json"
-            stage_hooks(stage, VENV_DIR / "bin" / "arize-harness")
+            stage_hooks(stage, venv_bin("arize-harness"))
             if not dry_run():
                 install_hooks(stage, target)
         info("Native Grok tracing hooks configured")

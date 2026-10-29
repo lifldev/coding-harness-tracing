@@ -197,6 +197,22 @@ def test_duplicate_completion_and_model_split_do_not_duplicate_tokens(session):
     assert sum(m["llm.token_count.prompt"] for m in models) == 130
 
 
+def test_long_sessions_keep_newest_closed_turns(session):
+    root, directory, updates = session
+    history = []
+    for index in range(65):
+        turn = json.loads(json.dumps(updates))
+        for row in turn:
+            row["params"]["_meta"]["agentTimestampMs"] += index * 10000
+        turn[-1]["params"]["update"]["prompt_id"] = f"prompt-{index}"
+        history.extend(turn)
+    (directory / "updates.jsonl").write_text("\n".join(json.dumps(row) for row in history))
+    payloads = handlers.reconstruct("session-1", root)
+    assert len(payloads) == 64
+    assert attrs(spans(payloads[0])[0])["grok.prompt_id"] == "prompt-1"
+    assert attrs(spans(payloads[-1])[0])["grok.prompt_id"] == "prompt-64"
+
+
 def test_tool_failure_status_does_not_fabricate_task_failure(session):
     root, directory, _ = session
     p = directory / "events.jsonl"
@@ -238,3 +254,16 @@ def test_hook_install_is_additive_staged_and_refuses_foreign_file(tmp_path):
     target.write_text('{"hooks":{}}')
     with pytest.raises(ValueError, match="owned"):
         install.install_hooks(stage, target)
+
+
+def test_installer_uses_platform_venv_launcher(tmp_path, monkeypatch):
+    from core import config, setup
+
+    monkeypatch.setenv("GROK_HOME", str(tmp_path))
+    monkeypatch.setattr(config, "load_config", lambda: {"harnesses": {"grok": {"target": "phoenix"}}})
+    executable = tmp_path / "Scripts" / "arize-harness.exe"
+    monkeypatch.setattr(setup, "venv_bin", lambda name: executable)
+    monkeypatch.setattr("sys.argv", ["install.py", "install"])
+    install.main()
+    value = json.loads((tmp_path / "hooks" / "arize-tracing.json").read_text())
+    assert str(executable) in value["hooks"]["Stop"][0]["hooks"][0]["command"]

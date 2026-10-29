@@ -295,7 +295,7 @@ def reconstruct(session_id, sessions_root=None):
                     result.append(payload)
                     seen.add(pid)
                     if len(result) > 64:
-                        raise ValueError("native turn budget exceeded")
+                        result.pop(0)
                 segment = []
                 previous_end = observed
             return result

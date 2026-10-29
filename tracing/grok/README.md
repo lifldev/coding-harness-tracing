@@ -38,6 +38,8 @@ gets deterministic trace/span IDs. Hash-only delivery receipts under
 stay replayable; dry runs never acknowledge delivery. A hook may run before the
 terminal record is persisted, so a later completion/session-end event or explicit
 replay reconciles it. There is no background retry scheduler.
+Each snapshot includes the newest 64 closed turns; older delivered spans remain
+in the backend, and delayed initial replay is bounded to those latest turns.
 
 ## Measurement boundaries
 
