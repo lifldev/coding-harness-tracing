@@ -100,7 +100,7 @@ def work_attributes(harness: str, project: str, facts: dict) -> dict:
             "agent.role": role,
             "agent.host": host,
             "gen_ai.agent.name": harness,
-            "gen_ai.provider.name": {"claude-code": "anthropic", "codex": "openai"}.get(harness, ""),
+            "gen_ai.provider.name": {"claude-code": "anthropic", "codex": "openai", "grok": "xai"}.get(harness, ""),
         }
     )
     return {key: value for key, value in attrs.items() if isinstance(value, str) and value}

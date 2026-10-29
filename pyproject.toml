@@ -43,6 +43,8 @@ arize-hook-user-prompt-expansion = "tracing.claude_code.hooks.handlers:user_prom
 arize-hook-pre-compact = "tracing.claude_code.hooks.handlers:pre_compact"
 arize-hook-post-compact = "tracing.claude_code.hooks.handlers:post_compact"
 arize-hook-permission-denied = "tracing.claude_code.hooks.handlers:permission_denied"
+# Grok hook
+arize-hook-grok = "tracing.grok.hooks.handlers:main"
 # Codex hooks
 arize-hook-codex-notify = "tracing.codex.hooks.handlers:notify"
 # Copilot hooks

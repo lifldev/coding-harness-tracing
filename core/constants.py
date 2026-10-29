@@ -35,6 +35,13 @@ STATE_BASE_DIR = BASE_DIR / "state"
 # Used by adapters to look up service_name, scope_name, state_subdir, etc.
 # Keys match the harness names used in config.json harnesses section.
 HARNESSES: dict[str, HarnessMetadata] = {
+    "grok": {
+        "service_name": "grok",
+        "scope_name": "arize-grok-plugin",
+        "default_project_name": "grok",
+        "state_subdir": "grok",
+        "default_log_file": LOG_DIR / "grok.log",
+    },
     "claude-code": {
         "service_name": "claude-code",
         "scope_name": "arize-claude-plugin",

@@ -105,6 +105,7 @@ The plugin skips the wizard. Run the bundled `manage-cursor-tracing` skill once 
 
 | Harness Integration | Install command | Name |
 |---------------------|-----------------|------|
+| [Native Grok Build](tracing/grok/README.md) | `install.sh grok` / `install.bat grok` | `grok` |
 | [Claude Code CLI / Agent SDK](tracing/claude_code/README.md) | [macOS / Linux](tracing/claude_code/README.md#macos--linux) · [Windows](tracing/claude_code/README.md#windows-powershell) | `claude` |
 | [Claude Code CLI / Agent SDK](tracing/claude_code/README.md) | [Claude Plugin](tracing/claude_code/README.md#claude-code-marketplace) | `claude-code-tracing` |
 | [OpenAI Codex CLI](tracing/codex/README.md) | [macOS / Linux](tracing/codex/README.md#macos--linux) · [Windows](tracing/codex/README.md#windows-powershell) | `codex` |
